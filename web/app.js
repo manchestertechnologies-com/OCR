@@ -1,0 +1,330 @@
+"use strict";
+const $ = (s) => document.querySelector(s);
+const api = async (url, opts = {}) => {
+  const r = await fetch(url, opts);
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { const j = await r.json(); msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch {}
+    throw new Error(msg);
+  }
+  return r.headers.get("content-type")?.includes("json") ? r.json() : r;
+};
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let P = null;        // current project
+let page = 1;
+let selected = null; // question id
+let pollTimer = null;
+
+// ------------------------------------------------------------------ home
+async function loadHome() {
+  $("#home").hidden = false; $("#review").hidden = true;
+  const exams = await api("/api/exams");
+  $("#exam").innerHTML = exams.map((e) => `<option>${esc(e)}</option>`).join("");
+  const rows = await api("/api/projects");
+  $("#projects tbody").innerHTML = rows.map((p) => `
+    <tr><td>${esc(p.source_name)}</td><td>${esc(p.exam)}</td>
+    <td><span class="pill ${p.status === "ready" ? "ok" : p.status === "error" ? "bad" : "warn"}">${esc(p.status)}</span></td>
+    <td>${p.questions}</td><td>${p.needs_review}</td>
+    <td><button class="link" data-open="${esc(p.id)}">Open</button></td></tr>`).join("")
+    || `<tr><td colspan="6" class="hint">No papers yet.</td></tr>`;
+}
+$("#projects").addEventListener("click", (e) => { const id = e.target.dataset.open; if (id) openProject(id); });
+$("#nav-home").onclick = () => { clearInterval(pollTimer); loadHome(); };
+
+const drop = $("#drop");
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", (e) => { if (e.dataTransfer.files.length) { $("#file").files = e.dataTransfer.files; showFile(); } });
+$("#file").addEventListener("change", showFile);
+function showFile() { const f = $("#file").files[0]; $("#drop-text").textContent = f ? `${f.name} (${(f.size / 1e6).toFixed(1)} MB)` : "Drop a file"; }
+
+$("#upload-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = $("#file").files[0];
+  if (!f) return;
+  const fd = new FormData(); fd.append("file", f); fd.append("exam", $("#exam").value);
+  fd.append("mode", document.querySelector("input[name=mode]:checked").value);
+  $("#progress").hidden = false; $("#progress-msg").textContent = "Uploading…";
+  try {
+    const { id } = await api("/api/projects", { method: "POST", body: fd });
+    pollProgress(id);
+  } catch (err) { $("#progress-msg").textContent = "Upload failed: " + err.message; }
+};
+
+function pollProgress(id) {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    const p = await api(`/api/projects/${id}`);
+    $("#bar-fill").style.width = `${Math.round((p.progress?.fraction ?? 0) * 100)}%`;
+    $("#progress-msg").textContent = p.progress?.message ?? p.status;
+    if (p.status !== "processing") {
+      clearInterval(pollTimer);
+      if (p.status === "error") $("#progress-msg").textContent = "Failed: " + p.error;
+      else { $("#progress").hidden = true; openProject(id); }
+    }
+  }, 1000);
+}
+
+// ------------------------------------------------------------------ review
+async function openProject(id, keepPage = false) {
+  if (!$("#d-qtype").options.length)
+    $("#d-qtype").innerHTML = (await api("/api/question-types")).map((t) => `<option>${esc(t)}</option>`).join("");
+  P = await api(`/api/projects/${id}`);
+  $("#home").hidden = true; $("#review").hidden = false;
+  $("#r-title").textContent = `${P.source_name} · ${P.exam}`;
+  const st = $("#r-status"); st.textContent = P.status;
+  st.className = "pill " + (P.status === "ready" ? "ok" : P.status === "error" ? "bad" : "warn");
+  $("#btn-export").href = `/api/projects/${id}/export`;
+  if (!keepPage) {
+    const prof = await api(`/api/exams/${P.exam}`);
+    const subs = prof.subjects || [];
+    $("#cur-subject").innerHTML = `<option value="">auto</option>` + subs.map((s) => `<option>${esc(s)}</option>`).join("");
+    $("#subjects-list").innerHTML = subs.map((s) => `<option value="${esc(s)}">`).join("");
+    $("#draw-kind").value = P.mode === "manual" ? "question" : "";
+    $("#overlay").classList.toggle("drawing", !!drawMode());
+  }
+  const ps = P.crops.filter((c) => c.kind === "passage" && !c.superseded);
+  const popts = `<option value="">none</option>` + ps.map((c) => `<option value="${esc(c.passage_id)}">${esc(c.passage_id)}: ${esc(c.text.slice(0, 30))}</option>`).join("");
+  const cur = $("#cur-passage").value;
+  $("#cur-passage").innerHTML = popts; $("#cur-passage").value = ps.some((c) => c.passage_id === cur) ? cur : "";
+  $("#d-passage").innerHTML = popts;
+  $("#page-select").innerHTML = P.pages.map((pg) =>
+    `<option value="${pg.page}">${pg.page} / ${P.pages.length}${pg.quality_flag !== "ok" ? " ⚠ " + pg.quality_flag : ""}</option>`).join("");
+  if (!keepPage) page = P.pages[0]?.page ?? 1;
+  $("#page-select").value = page;
+  showRoundtrip(P.roundtrip);
+  renderPage(); renderList();
+  if (selected) renderDetail();
+}
+$("#page-select").onchange = (e) => { page = +e.target.value; renderPage(); };
+
+function showRoundtrip(rt) {
+  const el = $("#rt-report");
+  if (!rt) { el.hidden = true; return; }
+  el.hidden = false;
+  const lost = rt.pages.reduce((a, p) => a + p.lost_ink_count, 0);
+  el.className = "banner" + (rt.ok && !rt.hash_errors.length ? " ok" : "");
+  const pix = rt.pages.every((p) => p.pixel_equal) && !rt.hash_errors.length;
+  if (P.mode === "manual") {
+    el.className = "banner" + (pix ? " ok" : "");
+    el.textContent = (pix ? "Every crop matches the original page pixel for pixel. " : "Pixel or hash mismatch found! ") +
+      (lost ? `${lost} ink regions on the pages are not inside any crop (outlined in red) - check no question was missed.` : "All ink on the pages is inside a crop.");
+    return;
+  }
+  el.textContent = rt.ok && !rt.hash_errors.length
+    ? "Round-trip check passed: crops pasted back match the original pages, nothing lost."
+    : `Round-trip check: ${rt.hash_errors.length} hash errors, ${lost} uncropped ink regions` +
+      (rt.pages.some((p) => !p.pixel_equal) ? ", pixel mismatch found" : "") + ". Uncropped regions are outlined in red.";
+}
+
+function pageInfo() { return P.pages.find((p) => p.page === page); }
+
+function renderPage() {
+  const pg = pageInfo(); if (!pg) return;
+  const img = $("#page-img");
+  img.src = `/api/projects/${P.id}/file/${pg.path}`;
+  const ov = $("#overlay"); ov.innerHTML = "";
+  const pct = (b) => `left:${(b.x0 / pg.width) * 100}%;top:${(b.y0 / pg.height) * 100}%;width:${((b.x1 - b.x0) / pg.width) * 100}%;height:${((b.y1 - b.y0) / pg.height) * 100}%`;
+  const qByCrop = {};
+  P.questions.forEach((q) => q.parts.forEach((pt) => (qByCrop[pt.crop_id] = q)));
+  for (const c of P.crops) {
+    if (c.page !== page || c.superseded) continue;
+    const q = qByCrop[c.id] || P.questions.find((x) => x.id === c.parent_id);
+    const d = document.createElement("div");
+    d.className = "box" + (q?.needs_review && c.kind === "question" ? " review" : "") + (q && q.id === selected ? " sel" : "");
+    d.dataset.kind = c.kind; d.style.cssText = pct(c.box);
+    const label = c.kind === "question" && q ? `Q${q.q_no ?? "?"}${q.parts.length > 1 ? " part " + (q.parts.findIndex((p) => p.crop_id === c.id) + 1) : ""} · ${q.question_type}`
+      : c.kind === "passage" ? `passage ${c.passage_id}` : c.kind;
+    d.innerHTML = `<span class="tag">${esc(label)}</span>`;
+    if (q) d.onclick = (e) => { if (!drawMode()) { e.stopPropagation(); select(q.id); } };
+    ov.appendChild(d);
+    if (q && q.id === selected && c.user_box && c.snap_notes?.length) {   // the box as the user drew it
+      const u = document.createElement("div");
+      u.className = "userbox"; u.style.cssText = pct(c.user_box);
+      u.title = "your box - snapped: " + c.snap_notes.join("; ");
+      ov.appendChild(u);
+    }
+  }
+  const rp = P.roundtrip?.pages?.find((p) => p.page === page);
+  (rp?.lost_ink_regions ?? []).forEach((b) => {
+    const d = document.createElement("div"); d.className = "rubber"; d.style.cssText = pct(b) + ";border-color:#dc2626";
+    ov.appendChild(d);
+  });
+}
+
+function renderList() {
+  const only = $("#only-review").checked;
+  const qs = P.questions.filter((q) => !only || q.needs_review);
+  $("#q-count").textContent = `${qs.length} of ${P.questions.length} questions`;
+  $("#q-list").innerHTML = qs.map((q) => `
+    <li data-q="${esc(q.id)}" class="${q.id === selected ? "sel" : ""}">
+      <b>Q${esc(q.q_no ?? "?")}</b><span>${esc(q.subject ?? "")}</span>
+      <span class="snippet">${esc((q.text_edited ?? q.text).slice(0, 90))}</span>
+      ${q.needs_review ? '<span class="flag" title="needs review">⚠</span>' : ""}${q.edited ? "✎" : ""}
+    </li>`).join("");
+}
+$("#only-review").onchange = renderList;
+$("#q-list").onclick = (e) => { const li = e.target.closest("li"); if (li) select(li.dataset.q); };
+
+function select(qid) {
+  selected = qid;
+  const q = P.questions.find((x) => x.id === qid);
+  if (q && q.page !== page) { page = q.page; $("#page-select").value = page; }
+  renderPage(); renderList(); renderDetail();
+}
+
+const file = (rel) => `/api/projects/${P.id}/file/${rel}?t=${Date.now() % 1e7}`;
+
+function renderDetail() {
+  const q = P.questions.find((x) => x.id === selected);
+  $("#q-detail").hidden = !q; if (!q) return;
+  $("#d-title").textContent = `Q${q.q_no ?? "?"} · page ${q.page}${q.subject ? " · " + q.subject : ""}`;
+  $("#d-type").textContent = q.question_type + (q.multi_answer ? " (multi)" : "");
+  const c = $("#d-conf");
+  c.className = "pill " + (q.needs_review ? "warn" : "ok");
+  c.textContent = `type ${(q.type_confidence * 100).toFixed(0)}% · OCR ${(q.ocr_confidence * 100).toFixed(0)}% · ${q.quality_flag}`;
+  $("#d-signals").textContent = q.type_signals.length ? "Why: " + q.type_signals.join(" · ") : "";
+  const snapNotes = q.parts.flatMap((p) => P.crops.find((c) => c.id === p.crop_id)?.snap_notes ?? []);
+  $("#d-snap").textContent = snapNotes.length ? "Box snapped: " + [...new Set(snapNotes)].join(" · ") : "";
+  $("#d-passage").value = q.passage_id ?? "";
+  $("#d-reasons").innerHTML = q.review_reasons.map((r) => `<li>${esc(r)}</li>`).join("");
+  $("#d-crops").innerHTML = q.parts.map((p, i) => `<div class="part"><span>Part ${i + 1} · page ${p.page}</span>` +
+      (q.parts.length > 1 ? `<button class="link" data-rmpart="${i}">remove</button>` : "") +
+      `<img src="${file(p.crop_path)}" alt="original crop"></div>`).join("") +
+    (q.diagram_paths.length ? "<h4>Diagrams (locked)</h4>" + q.diagram_paths.map((d) => `<img src="${file(d)}">`).join("") : "") +
+    (q.option_images.length ? "<h4>Image options (locked)</h4>" + q.option_images.map((d) => `<img src="${file(d)}">`).join("") : "");
+  $("#d-ocr").textContent = q.text;
+  $("#d-qtype").value = q.question_type;
+  $("#d-qno").value = q.q_no ?? "";
+  $("#d-subject").value = q.subject ?? "";
+  $("#d-text").value = q.text_edited ?? q.text;
+  $("#d-diagrams").innerHTML = q.diagram_edited_path ? `<h4>Edited diagram copy</h4><img src="${file(q.diagram_edited_path)}">` : "";
+  updateDiff();
+  const f = { options: q.options.length ? q.options.join(" | ") : "—",
+    statements: q.statements.length ? q.statements.join(" | ") : "—", passage_id: q.passage_id ?? "—",
+    source_type: q.source_type, blur_score: q.blur_score.toFixed(1), original_sha256: q.original_sha256.slice(0, 16) + "…",
+    edits: q.edit_history.length };
+  $("#d-fields").innerHTML = Object.entries(f).map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
+}
+
+function wordDiff(a, b) {
+  const A = a.split(/(\s+)/), B = b.split(/(\s+)/);
+  const n = A.length, m = B.length;
+  if (n * m > 4e6) return esc(b);
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  let i = 0, j = 0, out = "";
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out += esc(A[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) out += `<del>${esc(A[i++])}</del>`;
+    else out += `<ins>${esc(B[j++])}</ins>`;
+  }
+  while (i < n) out += `<del>${esc(A[i++])}</del>`;
+  while (j < m) out += `<ins>${esc(B[j++])}</ins>`;
+  return out;
+}
+function updateDiff() {
+  const q = P.questions.find((x) => x.id === selected); if (!q) return;
+  const v = $("#d-text").value;
+  $("#d-diff").innerHTML = v === q.text ? "" : "<b>Changes:</b> " + wordDiff(q.text, v);
+}
+$("#d-text").addEventListener("input", updateDiff);
+
+async function act(fn) {
+  $("#busy").hidden = false;
+  try {
+    await fn(); await openProject(P.id, true);
+    const nextP = $("#cur-passage").dataset.next;           // new passage -> make it current
+    if (nextP) { $("#cur-passage").value = nextP; delete $("#cur-passage").dataset.next; }
+  } catch (e) { alert(e.message); }
+  finally { $("#busy").hidden = true; }
+}
+const qurl = (suffix) => `/api/projects/${P.id}/questions/${selected}/${suffix}`;
+$("#b-save").onclick = () => act(() => api(qurl("text"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: $("#d-text").value }) }));
+$("#b-labels").onclick = () => act(() => api(qurl("fields"), { method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ question_type: $("#d-qtype").value, q_no: /^\d+$/.test($("#d-qno").value) ? +$("#d-qno").value : null,
+    subject: $("#d-subject").value, passage_id: $("#d-passage").value }) }));
+$("#d-crops").addEventListener("click", (e) => {
+  const i = e.target.dataset.rmpart;
+  if (i !== undefined && confirm("Remove this part from the question? Its crop file is kept."))
+    act(() => api(`/api/projects/${P.id}/questions/${selected}/parts/${i}`, { method: "DELETE" }));
+});
+$("#b-undo").onclick = () => act(() => api(qurl("undo"), { method: "POST" }));
+$("#b-reset").onclick = () => { if (confirm("Reset text and diagram to the original?")) act(() => api(qurl("reset"), { method: "POST" })); };
+$("#b-delete").onclick = () => {
+  if (!confirm("Remove this question from the output? Its original crop files are kept.")) return;
+  act(async () => { await api(`/api/projects/${P.id}/questions/${selected}`, { method: "DELETE" }); selected = null; });
+};
+$("#d-diagram-file").onchange = (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  act(() => api(qurl("diagram"), { method: "POST", body: fd }));
+  e.target.value = "";
+};
+$("#btn-verify").onclick = () => act(() => api(`/api/projects/${P.id}/verify`, { method: "POST" }));
+
+// ------------------------------------------------------------------ manual cropping
+const drawMode = () => $("#draw-kind").value;
+$("#draw-kind").onchange = () => $("#overlay").classList.toggle("drawing", !!drawMode());
+const KEYS = { q: "question", p: "part", d: "diagram", t: "table", i: "option_image", a: "passage", s: "section", h: "header", m: "recrop" };
+document.addEventListener("keydown", (e) => {
+  if ($("#review").hidden || e.ctrlKey || e.metaKey || e.altKey || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  const k = e.key.toLowerCase();
+  if (k === "escape") $("#draw-kind").value = "";
+  else if (KEYS[k]) $("#draw-kind").value = KEYS[k];
+  else if (k === "arrowright" || k === "arrowleft") {
+    const n = page + (k === "arrowright" ? 1 : -1);
+    if (P.pages.some((p) => p.page === n)) { page = n; $("#page-select").value = n; renderPage(); }
+    return;
+  } else return;
+  $("#overlay").classList.toggle("drawing", !!drawMode());
+});
+let start = null, rubber = null;
+const ov = $("#overlay");
+function toPage(e) {
+  const r = ov.getBoundingClientRect(), pg = pageInfo();
+  return { x: Math.round(((e.clientX - r.left) / r.width) * pg.width), y: Math.round(((e.clientY - r.top) / r.height) * pg.height), px: e.clientX - r.left, py: e.clientY - r.top };
+}
+ov.addEventListener("pointerdown", (e) => {
+  if (!drawMode()) return;
+  e.preventDefault(); ov.setPointerCapture(e.pointerId);
+  start = toPage(e); rubber = document.createElement("div"); rubber.className = "rubber"; ov.appendChild(rubber);
+});
+ov.addEventListener("pointermove", (e) => {
+  if (!start) return;
+  const p = toPage(e);
+  Object.assign(rubber.style, { left: Math.min(start.px, p.px) + "px", top: Math.min(start.py, p.py) + "px", width: Math.abs(p.px - start.px) + "px", height: Math.abs(p.py - start.py) + "px" });
+});
+ov.addEventListener("pointerup", async (e) => {
+  if (!start) return;
+  const p = toPage(e), s = start; start = null; rubber.remove();
+  const box = { x0: Math.min(s.x, p.x), y0: Math.min(s.y, p.y), x1: Math.max(s.x, p.x), y1: Math.max(s.y, p.y) };
+  if (box.x1 - box.x0 < 8 || box.y1 - box.y0 < 8) return;
+  const mode = drawMode();
+  const needsQ = ["part", "diagram", "table", "option_image", "recrop"].includes(mode);
+  if (needsQ && !selected) { alert("Select a question first (press Esc and click it)."); return; }
+  if (mode === "recrop") {
+    const q = P.questions.find((x) => x.id === selected);
+    let part = q.parts.findIndex((p) => p.page === page);
+    if (part < 0) { alert("Draw the new box on the page where that question is."); return; }
+    if (q.parts.filter((p) => p.page === page).length > 1) {
+      const cx = (box.x0 + box.x1) / 2, cy = (box.y0 + box.y1) / 2;
+      part = q.parts.reduce((best, p, i) => p.page !== page ? best :
+        (Math.hypot((p.box.x0 + p.box.x1) / 2 - cx, (p.box.y0 + p.box.y1) / 2 - cy) <
+         Math.hypot((q.parts[best].box.x0 + q.parts[best].box.x1) / 2 - cx, (q.parts[best].box.y0 + q.parts[best].box.y1) / 2 - cy) ? i : best), part);
+    }
+    return act(() => api(qurl("recrop") + `?part=${part}&snap=${$("#snap").checked}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(box) }));
+  }
+  act(async () => {
+    const r = await api(`/api/projects/${P.id}/crops`, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ page, box, kind: mode, parent_id: needsQ ? selected : null,
+        subject: $("#cur-subject").value || null, passage_id: mode === "question" ? ($("#cur-passage").value || null) : null,
+        snap: $("#snap").checked }) });
+    if (r.question) selected = r.question.id;
+    if (mode === "passage" && r.crop?.passage_id) $("#cur-passage").dataset.next = r.crop.passage_id;
+  });
+});
+
+loadHome();

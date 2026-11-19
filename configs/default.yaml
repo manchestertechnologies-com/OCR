@@ -1,0 +1,30 @@
+# Global settings. Thresholds should be tuned on your own sample papers
+# (run training/eval/calibrate_quality.py) - these are starting values only.
+render_dpi: 300            # PDF vector pages are rendered at this DPI, never upscaled
+data_dir: data
+
+quality:
+  blur_page_min: 60.0      # variance of Laplacian below this -> page blurry
+  blur_region_min: 40.0    # per-crop threshold
+  rescan_page_min: 20.0    # below this the whole page needs a rescan
+  min_width_px: 1200       # page narrower than this -> low_resolution
+  contrast_min: 25.0       # std-dev of grey levels
+
+ocr:
+  printed_engine: tesseract     # tesseract | paddle
+  handwritten_engine: tesseract # tesseract | trocr  (trocr needs requirements-ml.txt)
+  tesseract_lang: eng           # e.g. eng+hin+mar+kan for bilingual CET papers
+  confidence_review: 0.80       # below this -> needs_review
+  unreadable_conf: 0.30         # words below this are output as [?]
+
+layout:
+  engine: heuristic             # heuristic | yolo
+  yolo_weights: models/layout_yolov8.pt
+  yolo_conf: 0.35
+  diagram_min_area_frac: 0.004  # non-text blobs larger than this fraction of page -> diagram
+  diagram_margin_px: 12         # keep a margin so no edge line or label is cut off
+  question_margin_px: 6
+
+classify:
+  fuzzy_threshold: 85           # rapidfuzz score for keyword hits
+  classifier_path: models/qtype_clf.joblib

@@ -1,0 +1,9 @@
+name: NEET
+subjects: [Physics, Chemistry, Botany, Zoology, Biology]
+option_labels: ["(1)", "(2)", "(3)", "(4)", "1.", "2.", "3.", "4."]
+columns: 2          # coaching PDFs are often two-column; detector still checks each page
+type_hints:
+  assertion_reason: ["Assertion", "Reason"]
+  statement: ["Statement I", "Statement-I", "Which of the following statements"]
+  match: ["Column I", "Column-I", "List-I", "Match"]
+  arrange: ["Arrange", "correct order", "sequence"]

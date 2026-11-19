@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exam Paper OCR</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="top">
+  <h1>Exam Paper OCR</h1>
+  <nav><button id="nav-home" class="link">Papers</button></nav>
+</header>
+
+<main id="home">
+  <section class="card upload">
+    <h2>Upload a question paper</h2>
+    <form id="upload-form">
+      <label>Exam
+        <select id="exam" required></select>
+      </label>
+      <label id="drop" class="drop">
+        <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp" required>
+        <span id="drop-text">Drop a PDF, scan or photo here, or click to choose</span>
+      </label>
+      <fieldset class="mode">
+        <label><input type="radio" name="mode" value="manual" checked> I will crop the questions</label>
+        <label><input type="radio" name="mode" value="auto"> Auto-crop, then I will review</label>
+      </fieldset>
+      <p class="hint">A PDF or the original image works best. Screenshots and compressed photos lose detail.</p>
+      <button type="submit" class="primary">Upload</button>
+    </form>
+    <div id="progress" hidden>
+      <div class="bar"><div id="bar-fill"></div></div>
+      <p id="progress-msg"></p>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Papers</h2>
+    <table id="projects"><thead><tr><th>File</th><th>Exam</th><th>Status</th><th>Questions</th><th>To review</th><th></th></tr></thead><tbody></tbody></table>
+  </section>
+</main>
+
+<main id="review" hidden>
+  <div class="toolbar">
+    <strong id="r-title"></strong>
+    <span id="r-status" class="pill"></span>
+    <span class="spacer"></span>
+    <label>Page <select id="page-select"></select></label>
+    <label>Draw
+      <select id="draw-kind">
+        <option value="question">Q · new question</option>
+        <option value="part">P · next part of selected question</option>
+        <option value="diagram">D · diagram for selected question</option>
+        <option value="table">T · table for selected question</option>
+        <option value="option_image">I · image option for selected question</option>
+        <option value="passage">A · passage (shared by questions)</option>
+        <option value="section">S · section heading</option>
+        <option value="header">H · header / instructions</option>
+        <option value="recrop">M · move selected question box</option>
+        <option value="">Esc · off (select boxes)</option>
+      </select>
+    </label>
+    <label>Subject <select id="cur-subject"><option value="">auto</option></select></label>
+    <label>Passage <select id="cur-passage"><option value="">none</option></select></label>
+    <label title="Fit rough boxes to the question: drop half-cut lines and column dividers, include the question number">
+      <input type="checkbox" id="snap" checked> Snap to content</label>
+    <button id="btn-verify">Run round-trip check</button>
+    <a id="btn-export" class="button primary">Export ZIP</a>
+  </div>
+  <div id="rt-report" class="banner" hidden></div>
+  <div class="split">
+    <div class="pane page-pane">
+      <div id="page-wrap">
+        <img id="page-img" alt="Original page">
+        <div id="overlay"></div>
+      </div>
+      <p class="hint">Drag a box around a question; its text, diagrams, options and type are extracted.
+        Keys: <b>Q</b> question · <b>P</b> next part · <b>D</b> diagram · <b>T</b> table · <b>I</b> image option ·
+        <b>A</b> passage · <b>M</b> move box · <b>Esc</b> select · <b>←/→</b> page.</p>
+      <p id="busy" class="busy" hidden>Analyzing crop…</p>
+    </div>
+    <div class="pane side">
+      <div class="filters">
+        <label><input type="checkbox" id="only-review"> Needs review only</label>
+        <span id="q-count"></span>
+      </div>
+      <ol id="q-list"></ol>
+      <div id="q-detail" hidden>
+        <div class="detail-head">
+          <h3 id="d-title"></h3>
+          <span id="d-type" class="pill"></span>
+          <span id="d-conf" class="pill"></span>
+        </div>
+        <p id="d-signals" class="signals"></p>
+        <p id="d-snap" class="signals"></p>
+        <ul id="d-reasons" class="reasons"></ul>
+        <div class="layers">
+          <div>
+            <h4>Original (locked)</h4>
+            <div id="d-crops"></div>
+            <pre id="d-ocr" class="ocr"></pre>
+          </div>
+          <div>
+            <h4>Editable copy</h4>
+            <textarea id="d-text" rows="12" spellcheck="false"></textarea>
+            <div id="d-diff" class="diff"></div>
+            <div id="d-diagrams"></div>
+            <label class="upload-edit">Replace diagram copy (PNG)
+              <input type="file" id="d-diagram-file" accept="image/png">
+            </label>
+          </div>
+        </div>
+        <div class="labels">
+          <label>Type <select id="d-qtype"></select></label>
+          <label>Q no <input type="text" id="d-qno" size="4"></label>
+          <label>Subject <input type="text" id="d-subject" size="12" list="subjects-list"></label>
+          <datalist id="subjects-list"></datalist>
+          <label>Passage <select id="d-passage"><option value="">none</option></select></label>
+          <button id="b-labels">Save labels</button>
+        </div>
+        <dl id="d-fields"></dl>
+        <div class="actions">
+          <button id="b-save" class="primary">Save text</button>
+          <button id="b-undo">Undo</button>
+          <button id="b-reset">Reset to original</button>
+          <button id="b-delete" class="danger">Remove question</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

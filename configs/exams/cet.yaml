@@ -1,0 +1,10 @@
+name: CET
+subjects: [Physics, Chemistry, Mathematics, Maths, Biology]
+option_labels: ["(A)", "(B)", "(C)", "(D)", "A.", "B.", "C.", "D.", "(a)", "(b)", "(c)", "(d)"]
+columns: 1
+bilingual: true     # set ocr.tesseract_lang to e.g. eng+mar or eng+kan
+type_hints:
+  match: ["Column I", "Column-I", "Match"]
+  assertion_reason: ["Assertion", "Reason"]
+  statement: ["Statement I", "Statement-I"]
+  diagram: ["figure", "diagram", "shown below"]

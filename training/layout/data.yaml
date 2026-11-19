@@ -1,0 +1,12 @@
+# Written by export_yolo_dataset.py (path is filled in there)
+path: ../datasets/exam_layout
+train: images/train
+val: images/val
+names:
+  0: question
+  1: diagram
+  2: table
+  3: passage
+  4: section
+  5: header
+  6: option_image

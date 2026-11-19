@@ -1,0 +1,10 @@
+# Optional ML engines. Use a Python 3.11 venv (torch/paddle lag behind new Python releases).
+#   py -3.11 -m venv .venv-ml ; .venv-ml\Scripts\pip install -r requirements.txt -r requirements-ml.txt
+-r requirements.txt
+ultralytics>=8.2          # YOLOv8 layout detection (train on DocLayNet + your labelled papers)
+torch>=2.3                # needed by ultralytics / TrOCR
+transformers>=4.44        # TrOCR handwriting OCR
+paddleocr>=2.8            # strong printed OCR, many Indic languages
+paddlepaddle>=2.6
+scikit-learn>=1.5         # question-type text classifier for ambiguous cases
+pix2tex>=0.1.2            # printed/handwritten math -> LaTeX

@@ -1,0 +1,9 @@
+name: JEE
+subjects: [Physics, Chemistry, Mathematics, Maths]
+option_labels: ["(A)", "(B)", "(C)", "(D)", "(1)", "(2)", "(3)", "(4)", "A.", "B.", "C.", "D."]
+columns: 1
+type_hints:
+  paragraph: ["Paragraph", "Passage", "Based on the above"]
+  multi_correct: ["one or more", "more than one"]
+  numerical: ["integer", "numerical value", "nearest integer"]
+  match: ["List-I", "List-II", "Column I", "Match"]
