@@ -102,7 +102,68 @@ class _Ink:
 def _med_h(ink: _Ink, b: Box) -> float:
     bands = [e - s for s, e in ink.row_bands(b.x0, b.x1, b.y0, b.y1, feather=False) if s > b.y0 and e < b.y1]
     bands = [h for h in bands if h >= 6]
-    return float(np.clip(np.median(bands), 12, 120)) if bands else 24.0
+    mh = float(np.clip(np.median(bands), 12, 120)) if bands else 24.0
+    # On a slightly tilted scan neighbouring lines merge into one band, and diagrams add tall
+    # bands, so the band median can come out at 2-3 lines. Letter heights are not affected:
+    # a text line is ~1.8x the median letter (x-height letters mixed with ascenders).
+    letter = _letter_h(ink, b)
+    if letter is not None:
+        mh = max(12.0, min(mh, 1.8 * letter))
+    return mh
+
+
+def _letter_h(ink: _Ink, b: Box) -> float | None:
+    a = ink.sub(b.x0, b.y0, b.x1, b.y1)
+    if a.size == 0:
+        return None
+    _, _, st, _ = cv2.connectedComponentsWithStats(a.astype(np.uint8), 8)
+    h, w = st[1:, cv2.CC_STAT_HEIGHT], st[1:, cv2.CC_STAT_WIDTH]
+    letters = h[(h >= 6) & (h <= 150) & (w <= 3 * h)]
+    return float(np.median(letters)) if letters.size >= 10 else None
+
+
+def _column_rules(ink: _Ink, x_from: int, x_to: int, y0: int, y1: int, mh: float) -> list[tuple[int, int]]:
+    """Column rules (solid or dotted vertical lines) between x_from and x_to, in page x.
+    A rule is a narrow strip with ink in most half-line slices of the box AND of the lines
+    above and below it, with white gutter on BOTH sides all the way down. Dense text can
+    cover a strip just as well, but never has that white on both sides; a graph's axis stops
+    where the graph ends. (Checked on a real 14-page scan: only the dividers pass.)"""
+    span = int(6 * mh)
+    a = ink.sub(x_from, y0 - span, x_to, y1 + span)
+    step = max(4, int(0.5 * mh))
+    n = a.shape[0] // step if a.size else 0
+    if n < 8:
+        return []
+    chunks = a[: n * step].reshape(n, step, a.shape[1]).any(axis=1)
+    # a few px of sideways tolerance: a dotted rule drifts on a tilted scan
+    k = max(3, int(0.25 * mh))
+    raw = chunks.mean(axis=0)
+    cov = (cv2.dilate(chunks.astype(np.uint8), np.ones((1, k), np.uint8)) > 0).mean(axis=0)
+    g = max(4, int(0.25 * mh))                         # width of white gutter required each side
+    xs = max(x_from, ink.X0)
+    out = []
+    for s, e in _runs(cov >= 0.6):
+        if e - s > 0.6 * mh:
+            continue
+        inked = np.nonzero(raw[s:e] > 0.05)[0]           # the rule's own ink, without the dilation
+        if inked.size == 0:
+            continue
+        rs, re_ = s + int(inked[0]), s + int(inked[-1]) + 1
+        left, right = raw[max(0, rs - 2 - g):max(0, rs - 2)], raw[re_ + 2:re_ + 2 + g]
+        if left.size and right.size and left.mean() <= 0.1 and right.mean() <= 0.1:
+            out.append((rs + xs, re_ + xs))
+    return out
+
+
+def _column_walls(ink: _Ink, b: Box, mh: float, look: int) -> tuple[int | None, int | None]:
+    """x of the nearest column rule left of / right of the box that snapping must not cross.
+    A rule just inside an edge counts too (the box then also caught a strip of the other
+    column); a rule in the middle of a wide box is a passage spanning both columns - ignore."""
+    rules = _column_rules(ink, b.x0 - look, b.x1 + look, b.y0, b.y1, mh)
+    inside = int(3 * mh)
+    left = [e for s, e in rules if (s + e) / 2 <= b.x0 + inside and (s + e) / 2 < b.x1 - inside]
+    right = [s for s, e in rules if (s + e) / 2 >= b.x1 - inside and (s + e) / 2 > b.x0 + inside]
+    return (max(left) if left else None), (min(right) if right else None)
 
 
 def _remove_dividers(ink: _Ink, b: Box, mh: float, notes: list[str]) -> Box:
@@ -256,9 +317,21 @@ def _snap_horizontal(ink: _Ink, b: Box, mh: float, include_marker: bool, notes: 
     lock_left = "removed column divider on the left" in notes
     word_gap = max(2, int(0.5 * mh))
     reach = int(3 * mh)
-    x0, x1 = b.x0, b.x1
+    # Never cross a column divider: the gaps between the other column's text, a dotted rule
+    # and this column's question number can each be narrower than a word gap, and would then
+    # look like one long word cut by the box edge.
+    wall_l, wall_r = _column_walls(ink, b, mh, look=int(7 * mh))
+    lo = wall_l if wall_l is not None else -10 ** 9
+    hi = wall_r if wall_r is not None else 10 ** 9
+    x0, x1 = max(b.x0, lo), min(b.x1, hi)
+    if x0 > b.x0:
+        notes.append("left out the other column (divider on the left)")
+    if x1 < b.x1:
+        notes.append("left out the other column (divider on the right)")
+    if x1 - x0 < 8:                                  # nothing sensible left - keep the box as drawn
+        x0, x1, lo, hi = b.x0, b.x1, -10 ** 9, 10 ** 9
     # characters cut at the edges -> extend to the end of the word
-    for s, e in ink.col_groups(b.x0 - reach, b.x1 + reach, b.y0, b.y1, gap=word_gap):
+    for s, e in ink.col_groups(max(b.x0 - reach, lo), min(b.x1 + reach, hi), b.y0, b.y1, gap=word_gap):
         if not lock_right and s < b.x1 < e and e - b.x1 <= reach:
             x1 = max(x1, e)
             notes.append("extended to letters cut on the right")
@@ -271,7 +344,7 @@ def _snap_horizontal(ink: _Ink, b: Box, mh: float, include_marker: bool, notes: 
         if lines:
             ls, le = lines[0]
             look = int(4 * mh)
-            win0 = x0 - look - int(2 * mh)
+            win0 = max(x0 - look - int(2 * mh), lo)
             groups = [g for g in ink.col_groups(win0, x0, ls, le, gap=word_gap) if g[1] <= x0]
             # drop column rules; they mark the column boundary
             rules = [g for g in groups if _is_vertical_rule(ink, g, ls, le, mh)]

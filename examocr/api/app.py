@@ -9,6 +9,7 @@ import json
 import tempfile
 import threading
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -18,11 +19,18 @@ from pydantic import BaseModel
 
 from .. import pipeline, store
 from ..config import ROOT, available_exams
+from ..export import build_docx, build_html
 from ..ingest import IMAGE_EXT
 from ..schemas import Box
 from ..verify import hash_check, roundtrip
 
-app = FastAPI(title="Exam paper OCR")
+@asynccontextmanager
+async def lifespan(_app):
+    store.mark_interrupted()
+    yield
+
+
+app = FastAPI(title="Exam paper OCR", lifespan=lifespan)
 WEB = ROOT / "web"
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 
@@ -30,9 +38,33 @@ PROGRESS: dict[str, dict] = {}
 MAX_UPLOAD = 200 * 1024 * 1024
 
 
+def _code_fingerprint() -> str:
+    """Python code is loaded once when the server starts, but web/ files are re-read on every
+    request - so after an update the page can look new while crops still use old code."""
+    import hashlib
+    h = hashlib.sha256()
+    for f in sorted((ROOT / "examocr").rglob("*.py")):
+        h.update(f"{f.relative_to(ROOT)}:{f.stat().st_mtime_ns}".encode())
+    return h.hexdigest()
+
+
+STARTED_WITH = _code_fingerprint()
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return (WEB / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(WEB / "favicon.svg", media_type="image/svg+xml")
+
+
+@app.get("/api/version")
+def version():
+    """stale = the code on disk changed since this server started: restart it."""
+    return {"stale": _code_fingerprint() != STARTED_WITH}
 
 
 @app.get("/api/exams")
@@ -63,7 +95,10 @@ async def upload(file: UploadFile = File(...), exam: str = Form(...), mode: str 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / name
         tmp.write_bytes(data)
-        pr = pipeline.create_project(tmp, exam, mode)
+        try:
+            pr = pipeline.create_project(tmp, exam, mode)
+        except ValueError as e:          # e.g. an unknown mode: a bad request, not a server crash
+            raise HTTPException(400, str(e)) from None
     PROGRESS[pr.id] = {"message": "queued", "fraction": 0.0}
 
     def work():
@@ -215,6 +250,11 @@ def export(pid: str):
         z.writestr("crops.json", json.dumps([json.loads(c.model_dump_json()) for c in pr.crops],
                                             indent=2, ensure_ascii=False))
         z.writestr("roundtrip.json", json.dumps(pr.roundtrip or {}, indent=2))
+        # the finished questions: text with every diagram at its place
+        z.writestr("questions.html", build_html(pr))
+        docx = build_docx(pr, base)
+        if docx:
+            z.writestr("questions.docx", docx)
         for folder in ("crops", "edits"):
             for f in (base / folder).glob("*.png") if (base / folder).exists() else []:
                 z.write(f, f"{folder}/{f.name}")

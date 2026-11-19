@@ -1,4 +1,5 @@
 """The USER draws the boxes; the app must extract text, images and type from each one."""
+import re
 import shutil
 
 import pytest
@@ -113,6 +114,50 @@ def test_image_options(tmp_data, tmp_path):
     assert q["q_no"] == 6
     assert len(q["option_images"]) == 4, (q["option_images"], q["diagram_paths"])
     assert len(q["options"]) == 4
+
+
+def test_display_text_keeps_layout_and_places_diagram(project):
+    from examocr import store
+    q = _draw(project.id, (150, 1100, 1500, 1830), subject="Physics")["question"]
+    shown = q["display_text"]
+    assert shown.splitlines()[0].lstrip().startswith("3.")
+    assert "[diagram 1]" in shown, shown                       # the diagram sits in the text
+    assert [f["label"] for f in q["figures"]] == ["diagram 1"]
+    assert q["figures"][0]["path"] == q["diagram_paths"][0]
+    # every OCR line is still there, in the same order, with no words changed
+    words = lambda s: re.sub(r"\[diagram \d+\]", " ", s).split()  # noqa: E731
+    assert words(shown)[1:] == words(q["text"])[1:]
+    # saving the copy unchanged is not an edit
+    r = store.edit_text(project.id, q["id"], shown)
+    assert r.text_edited is None and not r.edited
+
+
+def test_final_output_has_diagrams_in_place(project):
+    import io
+    import zipfile
+    from examocr import store
+    from examocr.export import build_docx, build_html, final_text
+    q = _draw(project.id, (150, 1100, 1500, 1830), subject="Physics")["question"]
+    path = q["figures"][0]["path"]
+    pr = store.load(project.id)
+    page = build_html(pr)
+    assert f'<img src="{path}"' in page and "[diagram 1]" not in page
+    docx = zipfile.ZipFile(io.BytesIO(build_docx(pr, store.project_dir(project.id))))
+    assert any(n.startswith("word/media/") for n in docx.namelist()), "diagram embedded in Word"
+    # the reviewer drags the diagram to the end: the final output follows the edited copy
+    moved = q["display_text"].replace("[diagram 1]", "") + "\n[diagram 1]"
+    store.edit_text(project.id, q["id"], moved)
+    pr = store.load(project.id)
+    assert final_text(pr.questions[0]).endswith("[diagram 1]")
+    assert build_html(pr).rstrip().split("</div></section>")[0].endswith(f'<img src="{path}" alt="">')
+
+
+def test_display_text_option_columns(project):
+    q = _draw(project.id, (150, 1100, 1500, 1830))["question"]
+    lines = q["display_text"].splitlines()
+    one, three = next(ln for ln in lines if "(1)" in ln), next(ln for ln in lines if "(3)" in ln)
+    assert one.index("(1)") == three.index("(3)")              # option rows keep their indent
+    assert one.index("(1)") > lines[0].index("3.")             # ...which is deeper than the number's
 
 
 def test_passage_link_and_label_fix(project):

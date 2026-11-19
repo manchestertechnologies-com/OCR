@@ -17,7 +17,17 @@ let selected = null; // question id
 let pollTimer = null;
 
 // ------------------------------------------------------------------ home
+// Warn when the server runs older Python code than what is on disk (it loads code once at
+// start; this page is re-read every time). A server too old to know /api/version is stale too.
+async function checkStale() {
+  let stale;
+  try { const r = await fetch("/api/version"); stale = !r.ok || (await r.json()).stale; }
+  catch { return; }                                     // server unreachable: other errors show
+  $("#stale").hidden = !stale;
+}
+
 async function loadHome() {
+  checkStale();
   $("#home").hidden = false; $("#review").hidden = true;
   const exams = await api("/api/exams");
   $("#exam").innerHTML = exams.map((e) => `<option>${esc(e)}</option>`).join("");
@@ -30,44 +40,59 @@ async function loadHome() {
     || `<tr><td colspan="6" class="hint">No papers yet.</td></tr>`;
 }
 $("#projects").addEventListener("click", (e) => { const id = e.target.dataset.open; if (id) openProject(id); });
-$("#nav-home").onclick = () => { clearInterval(pollTimer); loadHome(); };
+$("#nav-home").onclick = () => { clearTimeout(pollTimer); setUploading(false); loadHome(); };
 
 const drop = $("#drop");
 ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => { if (e.dataTransfer.files.length) { $("#file").files = e.dataTransfer.files; showFile(); } });
 $("#file").addEventListener("change", showFile);
-function showFile() { const f = $("#file").files[0]; $("#drop-text").textContent = f ? `${f.name} (${(f.size / 1e6).toFixed(1)} MB)` : "Drop a file"; }
+function showFile() {
+  const f = $("#file").files[0];
+  drop.classList.remove("missing");
+  $("#drop-text").textContent = f ? `${f.name} (${(f.size / 1e6).toFixed(1)} MB)` : "Drop a PDF, scan or photo here, or click to choose";
+}
 
 $("#upload-form").onsubmit = async (e) => {
   e.preventDefault();
   const f = $("#file").files[0];
-  if (!f) return;
+  if (!f) {
+    // The real <input type=file> is hidden, so the browser can't show its own "required" bubble.
+    drop.classList.add("missing");
+    $("#drop-text").textContent = "Choose a file first: click here or drop a PDF, scan or photo.";
+    return;
+  }
   const fd = new FormData(); fd.append("file", f); fd.append("exam", $("#exam").value);
   fd.append("mode", document.querySelector("input[name=mode]:checked").value);
   $("#progress").hidden = false; $("#progress-msg").textContent = "Uploading…";
+  $("#bar-fill").style.width = "0%";
+  setUploading(true);                     // a second click would create a duplicate paper
   try {
     const { id } = await api("/api/projects", { method: "POST", body: fd });
     pollProgress(id);
-  } catch (err) { $("#progress-msg").textContent = "Upload failed: " + err.message; }
+  } catch (err) { $("#progress-msg").textContent = "Upload failed: " + err.message; setUploading(false); }
 };
+function setUploading(on) { $("#upload-form button[type=submit]").disabled = on; }
 
 function pollProgress(id) {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
-    const p = await api(`/api/projects/${id}`);
+  clearTimeout(pollTimer);
+  const tick = async () => {
+    let p;
+    try { p = await api(`/api/projects/${id}`); }
+    catch (err) { $("#progress-msg").textContent = "Lost contact with the server: " + err.message; setUploading(false); return; }
     $("#bar-fill").style.width = `${Math.round((p.progress?.fraction ?? 0) * 100)}%`;
     $("#progress-msg").textContent = p.progress?.message ?? p.status;
-    if (p.status !== "processing") {
-      clearInterval(pollTimer);
-      if (p.status === "error") $("#progress-msg").textContent = "Failed: " + p.error;
-      else { $("#progress").hidden = true; openProject(id); }
-    }
-  }, 1000);
+    if (p.status === "processing") { pollTimer = setTimeout(tick, 1000); return; }   // next poll only after this one
+    setUploading(false);
+    if (p.status === "error") $("#progress-msg").textContent = "Failed: " + p.error;
+    else { $("#progress").hidden = true; openProject(id); }
+  };
+  pollTimer = setTimeout(tick, 1000);
 }
 
 // ------------------------------------------------------------------ review
 async function openProject(id, keepPage = false) {
+  if (!keepPage) checkStale();
   if (!$("#d-qtype").options.length)
     $("#d-qtype").innerHTML = (await api("/api/question-types")).map((t) => `<option>${esc(t)}</option>`).join("");
   P = await api(`/api/projects/${id}`);
@@ -75,6 +100,7 @@ async function openProject(id, keepPage = false) {
   $("#r-title").textContent = `${P.source_name} · ${P.exam}`;
   const st = $("#r-status"); st.textContent = P.status;
   st.className = "pill " + (P.status === "ready" ? "ok" : P.status === "error" ? "bad" : "warn");
+  st.title = P.error || "";               // hover the red pill to see why a paper failed
   $("#btn-export").href = `/api/projects/${id}/export`;
   if (!keepPage) {
     const prof = await api(`/api/exams/${P.exam}`);
@@ -160,7 +186,7 @@ function renderList() {
   $("#q-list").innerHTML = qs.map((q) => `
     <li data-q="${esc(q.id)}" class="${q.id === selected ? "sel" : ""}">
       <b>Q${esc(q.q_no ?? "?")}</b><span>${esc(q.subject ?? "")}</span>
-      <span class="snippet">${esc((q.text_edited ?? q.text).slice(0, 90))}</span>
+      <span class="snippet">${esc((q.text_edited ?? baseText(q)).replace(/\s+/g, " ").trim().slice(0, 90))}</span>
       ${q.needs_review ? '<span class="flag" title="needs review">⚠</span>' : ""}${q.edited ? "✎" : ""}
     </li>`).join("");
 }
@@ -198,7 +224,7 @@ function renderDetail() {
   $("#d-qtype").value = q.question_type;
   $("#d-qno").value = q.q_no ?? "";
   $("#d-subject").value = q.subject ?? "";
-  $("#d-text").value = q.text_edited ?? q.text;
+  setEditor(q, q.text_edited ?? baseText(q));
   $("#d-diagrams").innerHTML = q.diagram_edited_path ? `<h4>Edited diagram copy</h4><img src="${file(q.diagram_edited_path)}">` : "";
   updateDiff();
   const f = { options: q.options.length ? q.options.join(" | ") : "—",
@@ -225,12 +251,70 @@ function wordDiff(a, b) {
   while (j < m) out += `<ins>${esc(B[j++])}</ins>`;
   return out;
 }
+// The editable copy starts from the page layout: same lines, indents and spacing, with
+// "[diagram 1]" etc. where each figure sits (older records: plain OCR text).
+const baseText = (q) => q.display_text || q.text;
 function updateDiff() {
   const q = P.questions.find((x) => x.id === selected); if (!q) return;
-  const v = $("#d-text").value;
-  $("#d-diff").innerHTML = v === q.text ? "" : "<b>Changes:</b> " + wordDiff(q.text, v);
+  const v = getEditor(), base = baseText(q);
+  $("#d-diff").innerHTML = v === base ? "" : "<b>Changes:</b> " + wordDiff(base, v);
 }
-$("#d-text").addEventListener("input", updateDiff);
+
+// ---- editable copy: the text with the real diagram images in it --------------------------
+// Stored as plain text with "[diagram 1]" / "[option image 2]" markers; shown with each
+// marker replaced by that locked crop image, which can be dragged to another spot.
+const FIG_RE = /\[(diagram|table|option image|figure) (\d+)\]/g;
+const ed = $("#d-text");
+function setEditor(q, text) {
+  const figs = Object.fromEntries((q.figures || []).map((f) => [f.label, f.path]));
+  ed.innerHTML = esc(text).replace(FIG_RE, (m, kind, n) => {
+    const path = figs[`${kind} ${n}`];
+    return path ? `<img class="fig" draggable="true" data-label="${kind} ${n}" src="${file(path)}" alt="${m}" title="${m} - drag to move">` : m;
+  });
+}
+function getEditor() {
+  let out = "";
+  const walk = (node) => {
+    for (const n of node.childNodes) {
+      if (n.nodeType === Node.TEXT_NODE) out += n.nodeValue;
+      else if (n.nodeName === "IMG" && n.dataset.label) out += `[${n.dataset.label}]`;
+      else if (n.nodeName === "BR") out += "\n";
+      else if (n.nodeName === "DIV" || n.nodeName === "P") { if (out && !out.endsWith("\n")) out += "\n"; walk(n); }
+      else walk(n);
+    }
+  };
+  walk(ed);
+  return out.replace(/ /g, " ").replace(/\n$/, "");
+}
+ed.addEventListener("input", updateDiff);
+// keep it plain text: Enter = newline, paste = text only (no foreign HTML / images)
+ed.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); document.execCommand("insertText", false, "\n"); }
+});
+ed.addEventListener("paste", (e) => {
+  e.preventDefault(); document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
+});
+// move a diagram: drag it and drop it where the text cursor shows
+let dragged = null;
+ed.addEventListener("dragstart", (e) => {
+  if (e.target.nodeName !== "IMG" || !e.target.dataset.label) { e.preventDefault(); return; }
+  dragged = e.target; dragged.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", "");
+});
+ed.addEventListener("dragend", () => { dragged?.classList.remove("dragging"); dragged = null; });
+ed.addEventListener("dragover", (e) => { if (dragged) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } });
+ed.addEventListener("drop", (e) => {
+  e.preventDefault();
+  if (!dragged) return;
+  const range = document.caretRangeFromPoint ? document.caretRangeFromPoint(e.clientX, e.clientY)
+    : (() => { const p = document.caretPositionFromPoint(e.clientX, e.clientY); if (!p) return null;
+        const r = document.createRange(); r.setStart(p.offsetNode, p.offset); return r; })();
+  if (!range || !ed.contains(range.startContainer) || dragged.contains(range.startContainer)) return;
+  dragged.classList.remove("dragging");
+  range.insertNode(dragged);              // moves the image (an element can only be in one place)
+  dragged = null;
+  updateDiff();
+});
 
 async function act(fn) {
   $("#busy").hidden = false;
@@ -242,7 +326,7 @@ async function act(fn) {
   finally { $("#busy").hidden = true; }
 }
 const qurl = (suffix) => `/api/projects/${P.id}/questions/${selected}/${suffix}`;
-$("#b-save").onclick = () => act(() => api(qurl("text"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: $("#d-text").value }) }));
+$("#b-save").onclick = () => act(() => api(qurl("text"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: getEditor() }) }));
 $("#b-labels").onclick = () => act(() => api(qurl("fields"), { method: "POST", headers: { "content-type": "application/json" },
   body: JSON.stringify({ question_type: $("#d-qtype").value, q_no: /^\d+$/.test($("#d-qno").value) ? +$("#d-qno").value : null,
     subject: $("#d-subject").value, passage_id: $("#d-passage").value }) }));
@@ -270,7 +354,7 @@ const drawMode = () => $("#draw-kind").value;
 $("#draw-kind").onchange = () => $("#overlay").classList.toggle("drawing", !!drawMode());
 const KEYS = { q: "question", p: "part", d: "diagram", t: "table", i: "option_image", a: "passage", s: "section", h: "header", m: "recrop" };
 document.addEventListener("keydown", (e) => {
-  if ($("#review").hidden || e.ctrlKey || e.metaKey || e.altKey || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if ($("#review").hidden || e.ctrlKey || e.metaKey || e.altKey || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable) return;
   const k = e.key.toLowerCase();
   if (k === "escape") $("#draw-kind").value = "";
   else if (KEYS[k]) $("#draw-kind").value = KEYS[k];
@@ -297,6 +381,7 @@ ov.addEventListener("pointermove", (e) => {
   const p = toPage(e);
   Object.assign(rubber.style, { left: Math.min(start.px, p.px) + "px", top: Math.min(start.py, p.py) + "px", width: Math.abs(p.px - start.px) + "px", height: Math.abs(p.py - start.py) + "px" });
 });
+ov.addEventListener("pointercancel", () => { start = null; rubber?.remove(); });   // drag interrupted
 ov.addEventListener("pointerup", async (e) => {
   if (!start) return;
   const p = toPage(e), s = start; start = null; rubber.remove();

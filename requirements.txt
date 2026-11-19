@@ -11,4 +11,5 @@ fastapi>=0.115
 uvicorn>=0.30
 python-multipart>=0.0.9
 jiwer>=3.0
+python-docx>=1.1          # Word export of the finished questions (text + diagrams in place)
 pytest>=8.0

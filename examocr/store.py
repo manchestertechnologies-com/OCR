@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,9 +52,19 @@ def _lock(pid: str) -> threading.Lock:
 def save(project: Project) -> None:
     d = project_dir(project.id)
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / "project.json.tmp"
+    tmp = d / f"project.json.{uuid.uuid4().hex[:8]}.tmp"   # unique: two savers never share a temp file
     tmp.write_text(project.model_dump_json(indent=2), encoding="utf-8")
-    os.replace(tmp, d / "project.json")
+    # On Windows the swap fails while anything has project.json open (the web page polling
+    # progress, antivirus scanning the new file). That lasts milliseconds, so retry briefly.
+    for attempt in range(40):
+        try:
+            os.replace(tmp, d / "project.json")
+            return
+        except PermissionError:
+            if attempt == 39:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.05)
 
 
 def load(pid: str) -> Project:
@@ -73,6 +85,42 @@ def list_projects() -> list[dict]:
     return out
 
 
+# Everything set_fields may change, so undo can put it back exactly.
+_LABEL_FIELDS = ("question_type", "multi_answer", "type_signals", "type_confidence", "labels_reviewed",
+                 "q_no", "q_no_inferred", "subject", "passage_id")
+
+
+def _base_text(q: QuestionRecord) -> str:
+    """What the editable copy starts from: the page layout with figure markers (older
+    records without one fall back to the plain OCR text)."""
+    return q.display_text or q.text
+
+
+def _json_dict(s: str | None) -> dict | None:
+    try:
+        v = json.loads(s) if s else None
+    except ValueError:
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def mark_interrupted() -> list[str]:
+    """Call once at server start. A paper still 'processing' then lost its worker thread when
+    the server stopped, so mark it failed instead of leaving the page polling forever."""
+    out = []
+    for f in (data_dir() / "projects").glob("*/project.json"):
+        try:
+            pr = Project.model_validate_json(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if pr.status == "processing":
+            pr.status = "error"
+            pr.error = "Processing was interrupted because the server stopped. Upload the paper again."
+            save(pr)
+            out.append(pr.id)
+    return out
+
+
 def _question(project: Project, qid: str) -> QuestionRecord:
     for q in project.questions:
         if q.id == qid:
@@ -85,11 +133,12 @@ def edit_text(pid: str, qid: str, new_text: str | None) -> QuestionRecord:
     with _lock(pid):
         pr = load(pid)
         q = _question(pr, qid)
-        before = q.text_edited if q.text_edited is not None else q.text
-        q.text_edited = None if new_text is None or new_text == q.text else new_text
+        base = _base_text(q)
+        before = q.text_edited if q.text_edited is not None else base
+        q.text_edited = None if new_text is None or new_text == base else new_text
         q.edit_history.append(EditEntry(time=now(), field="text",
                                         description="text edited" if q.text_edited else "text reset",
-                                        before=before, after=q.text_edited or q.text))
+                                        before=before, after=q.text_edited or base))
         q.edited = q.text_edited is not None or q.diagram_edited_path is not None
         save(pr)
         return q
@@ -161,6 +210,7 @@ def attach_part(pr: Project, original: np.ndarray, q: QuestionRecord, page_no: i
                       q.id if k == 1 else f"{q.id}_part{k}", parent=q.id)
     if snap:
         c.user_box, c.snap_notes = user_box, notes
+    fig_ids: dict[int, str] = {}
     for j, g in enumerate(pa.graphics, start=1):
         gc, gimg = _save_crop(pr, original, g.kind, page_no, g.box, f"{c.id}_{g.kind.value}{j}",
                               parent=q.id, source_part=c.id)
@@ -168,7 +218,10 @@ def attach_part(pr: Project, original: np.ndarray, q: QuestionRecord, page_no: i
         # edge_cut checks the drawing's own ink against the question box edge. (A plain
         # "ink on the border" test on the padded crop fires on neighbouring text.)
         gc.needs_review = g.edge_cut
+        fig_ids[j] = gc.id
+    layout = re.sub(r"\{\{fig:(\d+)\}\}", lambda m: "{{crop:%s}}" % fig_ids[int(m.group(1))], pa.layout)
     part = QuestionPart(page=page_no, box=pa.box, crop_id=c.id, crop_path=c.path, text=pa.text,
+                        layout_text=layout,
                         ocr_confidence=pa.confidence, source_type=pa.source_type,
                         blur_score=pa.blur, quality_flag=pa.quality_flag,
                         edge_warnings=pa.edge_warnings)
@@ -333,15 +386,29 @@ def undo(pid: str, qid: str) -> QuestionRecord:
             return q
         last = q.edit_history.pop()
         if last.field == "text":
-            q.text_edited = None if (last.before is None or last.before == q.text) else last.before
+            q.text_edited = None if last.before in (None, q.text, _base_text(q)) else last.before
         elif last.field == "diagram":
             q.diagram_edited_path = last.before
+        elif last.field == "reset":
+            snap = _json_dict(last.before)
+            if snap is None:          # entries written before reset kept a snapshot: text only
+                snap = {"text_edited": last.before}
+            q.text_edited = snap.get("text_edited")
+            q.diagram_edited_path = snap.get("diagram_edited_path")
+        elif last.field == "labels":
+            snap = _json_dict(last.before)
+            if snap is not None:      # older entries have no snapshot and cannot be restored
+                for k, v in snap.items():
+                    setattr(q, k, QuestionType(v) if k == "question_type" else v)
         elif last.field in ("recrop", "remove_part"):
             info = json.loads(last.before)
             old = QuestionPart(**info["part"])
             if last.field == "recrop":
                 new = q.parts.pop(info["index"])
                 _set_part_superseded(pr, new, True)
+                if old.crop_path in q.superseded_crops:
+                    q.superseded_crops.remove(old.crop_path)
+                q.superseded_crops.append(new.crop_path)
             q.parts.insert(info["index"], old)
             _set_part_superseded(pr, old, False)
             q.original_sha256 = next(c.sha256 for c in pr.crops if c.id == q.parts[0].crop_id)
@@ -365,7 +432,9 @@ def reset(pid: str, qid: str) -> QuestionRecord:
         pr = load(pid)
         q = _question(pr, qid)
         q.edit_history.append(EditEntry(time=now(), field="reset", description="reset to original",
-                                        before=q.text_edited, after=None))
+                                        before=json.dumps({"text_edited": q.text_edited,
+                                                           "diagram_edited_path": q.diagram_edited_path}),
+                                        after=None))
         q.text_edited = None
         q.diagram_edited_path = None
         q.edited = False
@@ -398,6 +467,7 @@ def set_fields(pid: str, qid: str, question_type: str | None = None, q_no: int |
     with _lock(pid):
         pr = load(pid)
         q = _question(pr, qid)
+        snapshot = json.dumps({k: getattr(q, k) for k in _LABEL_FIELDS}, default=lambda e: e.value)
         changes = []
         if question_type and question_type != q.question_type.value:
             changes.append(f"type {q.question_type.value} -> {question_type}")
@@ -416,7 +486,8 @@ def set_fields(pid: str, qid: str, question_type: str | None = None, q_no: int |
             changes.append(f"passage {q.passage_id} -> {passage_id or None}")
             q.passage_id = passage_id or None
         if changes:
-            q.edit_history.append(EditEntry(time=now(), field="labels", description="; ".join(changes)))
+            q.edit_history.append(EditEntry(time=now(), field="labels", description="; ".join(changes),
+                                            before=snapshot))
         assemble_question(pr, q)
         save(pr)
         return q

@@ -104,3 +104,46 @@ def test_right_column_box_keeps_its_own_first_line(page):
 def test_snap_never_breaks_a_clean_box(page):
     b, notes, pa = _snap_and_read(page, (60, 190, 1240, 425))
     assert pa.q_no == 1 and len(pa.text.splitlines()) == 4
+
+
+def tight_gutter_page():
+    """Like the real CET scan: the left column's text ends ~20 px before a dotted divider and
+    the right column's number starts ~20 px after it - each gap narrower than a word gap."""
+    W, H = 2600, 1600
+    img = Image.new("RGB", (W, H), "white")
+    d = ImageDraw.Draw(img)
+    f = font(42)
+    div = 1250
+    for yy in range(40, 1560, 12):
+        d.ellipse([div - 2, yy, div + 2, yy + 4], fill=(110, 110, 110))
+    y = 120
+    for ln in ["System in which there is no exchange of", "matter, work or energy from surround-",
+               "ings is called the closed, open or the", "isolated system, of which the first one",
+               "allows heat but not matter to cross the", "boundary of the system in an adiabatic",
+               "process. When heat cannot cross it the", "process is said to be adiabatic, which",
+               "is the case for an insulated vessel too."]:
+        d.text((div - 22 - d.textlength(ln, font=f), y), ln, fill="black", font=f)   # flush right
+        y += 58
+    d.text((div + 22, 120), "8.", fill=GREEN, font=f)
+    y = 120
+    for ln in ["Work done on an ideal gas in a cylinder", "when it is compressed is shown below:",
+               "(a) 10 J      (b) 20 J", "(c) 30 J      (d) 40 J"]:
+        d.text((div + 95, y), ln, fill="black", font=f)
+        y += 58
+    d.rectangle([div + 200, y + 20, div + 700, y + 420], outline="black", width=4)     # a diagram
+    d.line([div + 260, y + 380, div + 640, y + 80], fill="black", width=4)
+    return np.array(img)[:, :, ::-1].copy()
+
+
+def test_box_never_crosses_column_divider():
+    """The left edge sits just right of the divider; snapping must not 'extend to letters cut
+    on the left' across it into the other column (that gave Q? and [?] on every question)."""
+    page = tight_gutter_page()
+    b, notes, pa = _snap_and_read(page, (1258, 110, 2400, 820))
+    assert b.x0 >= 1252, (b, notes)
+    assert pa.q_no == 8, pa.text
+    assert "exchange" not in pa.text and "adiabatic" not in pa.text
+    # and the other way: a left-column box whose right edge runs past the divider
+    b, notes, pa = _snap_and_read(page, (300, 110, 1300, 640))
+    assert b.x1 <= 1248, (b, notes)
+    assert "Work done" not in pa.text and "8." not in pa.text

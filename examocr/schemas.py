@@ -120,6 +120,9 @@ class QuestionPart(BaseModel):
     crop_id: str
     crop_path: str
     text: str = ""                     # verbatim OCR of this part (diagram areas excluded)
+    # the same words laid out as on the page (indents, spacing) with {{crop:<id>}} where each
+    # diagram / table / image option sits
+    layout_text: str = ""
     ocr_confidence: float = 0.0
     source_type: str = "printed"
     blur_score: float = 0.0
@@ -139,6 +142,10 @@ class QuestionRecord(BaseModel):
     crop_id: str
     parts: list[QuestionPart] = Field(default_factory=list)
     text: str                                  # OCR verbatim, never edited
+    # the question as it looks on the page: same lines, indents and spacing, with
+    # "[diagram 1]" / "[table 1]" / "[option image 2]" where each figure sits
+    display_text: str = ""
+    figures: list[dict] = Field(default_factory=list)   # {"label": "diagram 1", "path": crop png}
     text_edited: Optional[str] = None
     options: list[str] = Field(default_factory=list)
     statements: list[str] = Field(default_factory=list)
