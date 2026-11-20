@@ -30,13 +30,17 @@ from .segment import Block, segment_document
 from .verify import hash_check, roundtrip
 
 log = logging.getLogger(__name__)
+SCRIPTS = ("auto", "printed", "handwritten")
 
 
-def create_project(src: Path, exam: str, mode: str = "manual") -> Project:
+def create_project(src: Path, exam: str, mode: str = "manual", script: str = "auto") -> Project:
     exam_profile(exam)  # validate
     if mode not in ("manual", "auto"):
         raise ValueError("mode must be manual or auto")
-    pr = Project(id=store.new_id(), exam=exam.upper(), source_name=src.name, created=store.now(), mode=mode)
+    if script not in SCRIPTS:
+        raise ValueError("script must be auto, printed or handwritten")
+    pr = Project(id=store.new_id(), exam=exam.upper(), source_name=src.name, created=store.now(), mode=mode,
+                 script=script)
     d = store.project_dir(pr.id)
     (d / "source").mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, d / "source" / src.name)
@@ -113,7 +117,7 @@ def _auto_crop(pr: Project, originals: list[np.ndarray], wcs: list[WorkingCopy],
             continue
         for pg, bx in boxes:
             c, _ = store._save_crop(pr, originals[pg - 1], b.kind, pg, bx, f"{b.kind.value}_{len(pr.crops) + 1:04d}")
-            pa = analyze_part(originals[pg - 1], pg, bx)
+            pa = analyze_part(originals[pg - 1], pg, bx, script=pr.script)
             c.text, c.ocr_confidence, c.subject = pa.text, pa.confidence, b.subject
             c.needs_review = pa.confidence < cfg["ocr"]["confidence_review"] or c.quality_flag != "ok"
             for j, g in enumerate(pa.graphics, start=1):

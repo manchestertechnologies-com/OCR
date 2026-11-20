@@ -417,10 +417,12 @@ def _starts_with_marker(strip: np.ndarray) -> bool:
 
 def snap_box(original: np.ndarray, box: Box, include_marker: bool = True) -> tuple[Box, list[str]]:
     """Return (snapped box, notes). Falls back to the user's box if anything looks wrong."""
+    from .paper import paper_only
     H, W = original.shape[:2]
     user = box.clip(W, H)
     if user.w < 8 or user.h < 8:
         return user, []
+    original = paper_only(original)          # desk / keyboard in a photo is not content to snap to
     try:
         ink = _Ink(original, user, ctx=max(200, int(0.3 * max(user.w, user.h))))
         mh = _med_h(ink, user)
@@ -437,6 +439,16 @@ def snap_box(original: np.ndarray, box: Box, include_marker: bool = True) -> tup
         b = _snap_vertical(ink, b, mh, notes, has_marker)
         b = _snap_horizontal(ink, b, mh, include_marker, notes)
         b = _snap_vertical(ink, b, mh, notes, has_marker)
+        # finishing a cut line moves an edge by about one line. Much more means the lines are
+        # tilted (a phone photo) and a "whole line" reaches into the next question: keep the
+        # user's edge there
+        far = 1.5 * mh + 4
+        if user.y0 - b.y0 > far or b.y1 - user.y1 > far:
+            y0 = user.y0 if user.y0 - b.y0 > far else b.y0
+            y1 = user.y1 if b.y1 - user.y1 > far else b.y1
+            b = Box(x0=b.x0, y0=y0, x1=b.x1, y1=y1)
+            notes = [n for n in notes if "first line" not in n and "last line" not in n]
+            notes.append("lines are tilted - kept your top/bottom edge")
         b = _pad_into_white(ink, b, int(settings()["layout"]["question_margin_px"]) + 4)
         b = b.clip(W, H)
     except Exception:

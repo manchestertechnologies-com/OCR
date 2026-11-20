@@ -33,6 +33,7 @@ from .schemas import Box, Project, QuestionRecord, QuestionType, RegionKind
 from .segment import match_marker
 
 OPTION_LABEL = re.compile(r"^\(?([A-Da-d1-4])[.)]\)?$|^\(([A-Da-d1-4])\)")
+OPTION_START = re.compile(r"^\(?[A-Da-d1-4][.)]\s")
 
 
 @dataclass
@@ -59,46 +60,38 @@ class PartAnalysis:
     layout: str = ""             # text laid out as on the page, {{fig:n}} = graphics[n-1]
 
 
-def analyze_part(original: np.ndarray, page: int, box: Box, find_graphics: bool = True) -> PartAnalysis:
+def analyze_part(original: np.ndarray, page: int, box: Box, find_graphics: bool = True,
+                 script: str = "auto") -> PartAnalysis:
+    """script: auto | printed | handwritten - what the paper is written in (set at upload).
+    The box is used exactly as the user drew it: nothing is moved or extended, the app only
+    reads what is inside it."""
+    from .ocr import get_engine
+    from .paper import paper_only
     cfg = settings()
     unreadable = cfg["ocr"]["unreadable_conf"]
+    # a phone photo: desk / keyboard around the sheet is not ink (analysis copy only - the
+    # saved crop is cut from the untouched page by the caller)
+    original = paper_only(original)
     box = box.clip(original.shape[1], original.shape[0])
     img = cut(original, box)
     blur, flag = crop_quality(img)
 
-    res = read_region(img, "printed")                        # pass 1, on original pixels
-    lines: dict[int, list] = {}
-    for w in res.words:
-        lines.setdefault(w.line_id, []).append(w)
-    heights = [w.box.h for w in res.words if w.conf > 0.5 and w.box.h > 3]
-    med_h = float(np.median(heights)) if heights else 24.0
-
+    # pass 1, fast (Tesseract): word boxes to find printed diagrams, and print vs handwriting
+    fast = cfg["ocr"]["printed_engine"]
+    res = get_engine("tesseract" if fast == "glm" else fast).read(img)
+    # Tesseract reads print at 0.8+; under 0.35 it is (almost always) handwriting
+    hand = script == "handwritten" or (script == "auto" and (res.confidence < 0.35 or looks_handwritten(img, res.confidence)))
+    if cfg["ocr"]["handwritten_engine" if hand else "printed_engine"] == "glm":
+        engine = get_engine("glm")
+        if engine.name == "glm":                             # else: model not installed -> below
+            return _analyze_vlm(engine, original, page, box, img, blur, flag, find_graphics, hand, res)
+    if hand:
+        out = _analyze_handwritten(original, page, box, img, blur, flag, find_graphics)
+        if out is not None:                                  # None: handwriting engine not installed
+            return out
+    lines = _lines(res)
     wc = make_working_copy(img, deskew=False)                # detection copy only
-    graphics: list[FoundGraphic] = []
-    local_boxes: list[Box] = []                              # same graphics, crop coordinates
-    if find_graphics:
-        text_boxes = [w.box for ws in lines.values() if sum(x.conf > 0.5 for x in ws) >= 3
-                      for w in ws if w.conf > 0.5]
-        page_area = original.shape[0] * original.shape[1]
-        min_area = max(cfg["layout"]["diagram_min_area_frac"] * page_area, (5 * med_h) ** 2)
-        margin = cfg["layout"]["diagram_margin_px"]
-        found = detect_graphics(wc.binary, res.words, med_h, text_boxes, min_area_px=min_area)
-        trimmed = _trim_figure_boxes([g.box for g in found], text_boxes, wc.binary > 0)
-        for g, local in zip(found, trimmed):
-            # cut off = the drawing's INK reaches the crop border (not just a label's box)
-            bw = wc.binary[local.y0:local.y1, local.x0:local.x1] > 0
-            H_, W_ = img.shape[:2]
-            edge = bool(bw.size) and (
-                (local.y0 <= 1 and bw[:2].any()) or (local.y1 >= H_ - 1 and bw[-2:].any())
-                or (local.x0 <= 1 and bw[:, :2].any()) or (local.x1 >= W_ - 1 and bw[:, -2:].any()))
-            # margin only into white: a fixed pad catches the descenders of the line above or
-            # the next figure's labels, which then show up as slivers in the figure image
-            padded = _pad_into_white(wc.binary, local, margin)
-            pb = Box(x0=padded.x0 + box.x0, y0=padded.y0 + box.y0, x1=padded.x1 + box.x0, y1=padded.y1 + box.y0)
-            labels = " ".join(w.text for w in sorted(g.labels, key=lambda w: (w.box.y0 // 10, w.box.x0)))
-            graphics.append(FoundGraphic(kind=g.kind, box=pb.clip(original.shape[1], original.shape[0]),
-                                         labels=labels, edge_cut=edge))
-            local_boxes.append(local)
+    graphics, local_boxes = (_graphics_printed(original, box, img, res, wc) if find_graphics else ([], []))
 
     # Ink type per line -> route to the right engine.
     kinds = []
@@ -149,6 +142,412 @@ def analyze_part(original: np.ndarray, page: int, box: Box, find_graphics: bool 
     layout = compose_layout(res, local_boxes, unreadable, _marker_fix(img, res, q_no))
     return PartAnalysis(page=page, box=box, image=img, text=text, confidence=res.confidence,
                         source_type=source, blur=blur, quality_flag=flag, q_no=q_no,
+                        graphics=graphics, edge_warnings=warnings, layout=layout)
+
+
+def _lines(res: OCRResult) -> dict[int, list]:
+    lines: dict[int, list] = {}
+    for w in res.words:
+        lines.setdefault(w.line_id, []).append(w)
+    return lines
+
+
+def _graphics_printed(original: np.ndarray, box: Box, img: np.ndarray, res: OCRResult,
+                      wc) -> tuple[list[FoundGraphic], list[Box]]:
+    """Diagrams / tables in a printed crop: ink that is not a confident text line."""
+    cfg = settings()
+    lines = _lines(res)
+    heights = [w.box.h for w in res.words if w.conf > 0.5 and w.box.h > 3]
+    med_h = float(np.median(heights)) if heights else 24.0
+    graphics: list[FoundGraphic] = []
+    local_boxes: list[Box] = []                              # same graphics, crop coordinates
+    text_boxes = [w.box for ws in lines.values() if sum(x.conf > 0.5 for x in ws) >= 3
+                  for w in ws if w.conf > 0.5]
+    page_area = original.shape[0] * original.shape[1]
+    min_area = max(cfg["layout"]["diagram_min_area_frac"] * page_area, (5 * med_h) ** 2)
+    margin = cfg["layout"]["diagram_margin_px"]
+    found = detect_graphics(wc.binary, res.words, med_h, text_boxes, min_area_px=min_area)
+    trimmed = _trim_figure_boxes([g.box for g in found], text_boxes, wc.binary > 0)
+    H_, W_ = img.shape[:2]
+    for g, local in zip(found, trimmed):
+        # cut off = the drawing's INK reaches the crop border (not just a label's box)
+        bw = wc.binary[local.y0:local.y1, local.x0:local.x1] > 0
+        edge = bool(bw.size) and (
+            (local.y0 <= 1 and bw[:2].any()) or (local.y1 >= H_ - 1 and bw[-2:].any())
+            or (local.x0 <= 1 and bw[:, :2].any()) or (local.x1 >= W_ - 1 and bw[:, -2:].any()))
+        # margin only into white: a fixed pad catches the descenders of the line above or
+        # the next figure's labels, which then show up as slivers in the figure image
+        padded = _pad_into_white(wc.binary, local, margin)
+        pb = Box(x0=padded.x0 + box.x0, y0=padded.y0 + box.y0, x1=padded.x1 + box.x0, y1=padded.y1 + box.y0)
+        labels = " ".join(w.text for w in sorted(g.labels, key=lambda w: (w.box.y0 // 10, w.box.x0)))
+        graphics.append(FoundGraphic(kind=g.kind, box=pb.clip(original.shape[1], original.shape[0]),
+                                     labels=labels, edge_cut=edge))
+        local_boxes.append(local)
+    return graphics, local_boxes
+
+
+def _graphics_hand(original: np.ndarray, box: Box, img: np.ndarray) -> tuple[list[FoundGraphic], list[Box], list[Box]]:
+    """Hand-drawn figures: found on the ink that is NOT part of a text line, so cursive words
+    are never mistaken for a diagram. -> (graphics, crop-coordinate boxes, text line boxes)"""
+    from .ocr.handseg import binarize, segment
+    cfg = settings()
+    bw = binarize(img)
+    lay = segment(bw)
+    lh, ch = lay.line_h, lay.char_h
+    # a text piece: one line tall and a few letters wide
+    texty = [p for p in lay.pieces if p.box.h <= 1.6 * lh and p.box.w >= 3.5 * lh]
+    text_boxes = [p.box for p in texty]
+    graphics: list[FoundGraphic] = []
+    local_boxes: list[Box] = []
+    if not lay.pieces:
+        return graphics, local_boxes, text_boxes
+    det = bw.copy()                                          # drawings only: text lines removed
+    text_comps = [i for p in texty for i in p.comps]
+    if text_comps:
+        det[np.isin(lay.labels, text_comps)] = 0
+    found = detect_graphics(det, [], ch, text_boxes, min_area_px=(2.2 * lh) ** 2)
+    trimmed = _trim_figure_boxes([g.box for g in found], text_boxes, det > 0)
+    H_, W_ = img.shape[:2]
+    margin = cfg["layout"]["diagram_margin_px"]
+    for g, local in zip(found, trimmed):
+        sub = det[local.y0:local.y1, local.x0:local.x1] > 0
+        edge = bool(sub.size) and (
+            (local.y0 <= 1 and sub[:2].any()) or (local.y1 >= H_ - 1 and sub[-2:].any())
+            or (local.x0 <= 1 and sub[:, :2].any()) or (local.x1 >= W_ - 1 and sub[:, -2:].any()))
+        padded = _pad_into_white(bw, local, margin)
+        pb = Box(x0=padded.x0 + box.x0, y0=padded.y0 + box.y0, x1=padded.x1 + box.x0, y1=padded.y1 + box.y0)
+        graphics.append(FoundGraphic(kind=g.kind, box=pb.clip(original.shape[1], original.shape[0]),
+                                     edge_cut=edge))
+        local_boxes.append(local)
+    return graphics, local_boxes, text_boxes
+
+
+def _analyze_vlm(engine, original: np.ndarray, page: int, box: Box, img: np.ndarray, blur: float,
+                 flag: str, find_graphics: bool, hand: bool, res: OCRResult) -> PartAnalysis:
+    """GLM-OCR reads the crop (printed or handwritten, formulas and tables included).
+    Drawings are found first and saved as their own locked images; the model reads the
+    text around them with the drawings blanked (OCR input only), in one pass, and each
+    drawing's marker is placed where it sits on the page."""
+    from .ocr.glmocr import char_height
+    graphics: list[FoundGraphic] = []
+    local_boxes: list[Box] = []
+    ch = char_height(img)
+    if hand:
+        rules = lambda: _graphics_hand(original, box, img)[:2]  # noqa: E731
+    else:
+        rules = lambda: _graphics_printed(original, box, img, res, make_working_copy(img, deskew=False))  # noqa: E731
+    # the question's own sentences are never blanked or cut into a figure: on print,
+    # Tesseract's confident lines (3+ words) and option labels mark them
+    sentences, labels = ([], []) if hand else _sentence_boxes(res, img)
+    if find_graphics:
+        graphics, local_boxes = _graphics_model(original, box, img, ch, rules, add_rules=not hand,
+                                                text_boxes=sentences)
+    text, layout, conf, notes = read_crop(engine, img, box, graphics, local_boxes, ch, sentences + labels)
+    q_no = find_q_no(text)
+    warnings = notes + cut_edges(img, ch)
+    if q_no is not None and contains_next(text, q_no):
+        warnings.append(f"box also contains question {q_no + 1} - make it smaller")
+    return PartAnalysis(page=page, box=box, image=img, text=text, confidence=conf,
+                        source_type="handwritten" if hand else "printed", blur=blur, quality_flag=flag,
+                        q_no=q_no, graphics=graphics, edge_warnings=warnings, layout=layout)
+
+
+def _sentence_boxes(res: OCRResult, img: np.ndarray) -> tuple[list[Box], list[Box]]:
+    """Printed question text (crop coordinates) -> (sentence word boxes, option label boxes).
+    A sentence: a line with 3+ confident real words (2+ letters) - not a row of graph labels
+    like "(1) v  (2) v"."""
+    sent, labels = [], []
+    for ws in _lines(res).values():
+        sentence = sum(x.conf > 0.5 and len(re.sub(r"[^A-Za-z]", "", x.text)) >= 2 for x in ws) >= 3
+        for w in ws:
+            b = w.box.pad(2).clip(img.shape[1], img.shape[0])
+            if w.conf > 0.5 and sentence:
+                sent.append(b)
+            elif w.conf > 0.5 and OPTION_LABEL.match(w.text):
+                labels.append(b)
+    return sent, labels
+
+
+def _graphics_model(original: np.ndarray, box: Box, img: np.ndarray, ch: float,
+                    rules, add_rules: bool = True, text_boxes: list[Box] = ()) -> tuple[list[FoundGraphic], list[Box]]:
+    """Figures from the trained layout model (layout/docmodel.py), plus any figure the ink
+    rules find where the model found nothing. Without the model: the ink rules alone."""
+    from .layout.docmodel import find_figures
+    from .ocr.handseg import binarize
+    line_h = 2.0 * ch if ch > 0 else 24.0
+    found = find_figures(img, line_h)
+    if found is None:
+        return rules()
+    cfg = settings()
+    H, W = img.shape[:2]
+    bw = binarize(img)
+    n, labels, st, _ = cv2.connectedComponentsWithStats((bw > 0).astype(np.uint8), 8)
+    graphics: list[FoundGraphic] = []
+    local_boxes: list[Box] = []
+    kinds, tights = [], []
+    # every stroke belongs to the detected drawing nearest to it (an enlarged box must not
+    # take the label of the drawing below)
+    cx = st[:, 0] + st[:, 2] / 2.0
+    cy = st[:, 1] + st[:, 3] / 2.0
+    dist = np.stack([np.maximum(np.maximum(fb.x0 - cx, cx - fb.x1), 0) + np.maximum(np.maximum(fb.y0 - cy, cy - fb.y1), 0)
+                     for _, fb in found]) if found else np.zeros((0, n))
+    nearest = dist.argmin(axis=0) if found else np.zeros(n, int)
+    for k, (kind, b) in enumerate(found):
+        # whole strokes: a bond or label the model's box clips (at least half inside) is taken
+        # in, and so is a label hugging the drawing (an axis "v" just past the arrow tip)
+        if kind != RegionKind.table:
+            m = int(0.6 * line_h)
+            b = Box(x0=b.x0 - m, y0=b.y0 - m, x1=b.x1 + m, y1=b.y1 + m).clip(W, H)
+        ids = np.unique(labels[b.y0:b.y1, b.x0:b.x1])
+        tight = None
+        for i in ids[ids > 0]:
+            cb = Box(x0=int(st[i, 0]), y0=int(st[i, 1]), x1=int(st[i, 0] + st[i, 2]), y1=int(st[i, 1] + st[i, 3]))
+            inside = max(0, min(cb.x1, b.x1) - max(cb.x0, b.x0)) * max(0, min(cb.y1, b.y1) - max(cb.y0, b.y0))
+            if inside >= 0.5 * max(1, cb.w * cb.h) and nearest[i] == k:
+                tight = cb if tight is None else tight.union(cb)
+        if tight is not None and tight.w >= 6 and tight.h >= 6:
+            kinds.append(kind)
+            tights.append(tight)
+    # a sentence above / below poking into a figure's box: the figure ends before it
+    tights = _trim_figure_boxes(tights, list(text_boxes), bw > 0) if text_boxes else tights
+    for kind, tight in zip(kinds, tights):
+        sub = bw[tight.y0:tight.y1, tight.x0:tight.x1] > 0
+        edge = (tight.y0 <= 1 and sub[:2].any()) or (tight.y1 >= H - 1 and sub[-2:].any()) \
+            or (tight.x0 <= 1 and sub[:, :2].any()) or (tight.x1 >= W - 1 and sub[:, -2:].any())
+        padded = _pad_into_white(bw, tight, cfg["layout"]["diagram_margin_px"])
+        pb = Box(x0=padded.x0 + box.x0, y0=padded.y0 + box.y0, x1=padded.x1 + box.x0, y1=padded.y1 + box.y0)
+        graphics.append(FoundGraphic(kind=kind, box=pb.clip(original.shape[1], original.shape[0]), edge_cut=bool(edge)))
+        local_boxes.append(tight)
+    try:
+        extra_g, extra_b = rules() if add_rules else ([], [])
+    except Exception:
+        extra_g, extra_b = [], []
+    for g, lb in zip(extra_g, extra_b):
+        big = lb.w * lb.h > 0.5 * W * H
+        hit = any(max(0, min(lb.x1, m.x1) - max(lb.x0, m.x0)) * max(0, min(lb.y1, m.y1) - max(lb.y0, m.y0))
+                  > 0.2 * max(1, min(lb.w * lb.h, m.w * m.h)) for m in local_boxes)
+        if not big and not hit:
+            graphics.append(g)
+            local_boxes.append(lb)
+    return graphics, local_boxes
+
+
+BARE_NO = re.compile(r"^\s*[\[(]?(?:Q\.?\s*)?(\d{1,3})\s*[.):\]]?\s+(?=[A-Za-z(])")
+
+
+def find_q_no(text: str) -> int | None:
+    """The question number: a marker at the start of one of the first lines ("2)", "Q.12",
+    "7]"). A bare "1 In the following..." counts too: the user's box starts at the question.
+    A few lines are tried because a box may start with the end of the previous question."""
+    lines = [x for x in text.strip().splitlines() if x.strip()][:4]
+    for ln in lines:
+        n = match_marker(ln, None, False)
+        if n is not None:
+            return n
+    m = BARE_NO.match(lines[0]) if lines else None
+    return int(m.group(1)) if m and 0 < int(m.group(1)) <= 200 else None
+
+
+def contains_next(text: str, q_no: int) -> bool:
+    """Does the box run into question q_no + 1? Not when that number is an item of a numbered
+    list inside the question ("1. Reaction ... 2. ... 3. ..." in a match-the-column)."""
+    later = text.strip().splitlines()[2:]
+    nums = [match_marker(ln, None, False) for ln in later]
+    if q_no + 1 not in nums:
+        return False
+    items = set(n for n in nums if n is not None)
+    return not (1 in items or len(items) >= 3)
+
+
+OPT_TOKEN = re.compile(r"(?:(?<=\s)|^)(\(?[A-Da-d1-4][.)])(?=\s|$)")
+
+
+def read_crop(engine, img: np.ndarray, box: Box, graphics: list[FoundGraphic], local_boxes: list[Box],
+              ch: float, protect: list[Box] = ()) -> tuple[str, str, float, list[str]]:
+    """Read the whole crop in ONE pass with the drawings blanked (OCR input only), then put a
+    {{fig:n}} marker where each drawing sits. -> (text, layout, confidence, notes).
+    One pass on purpose: reading the crop in bands, the model invented the half of a line a
+    band edge cut through ("B) Q = 1" on a tilted photo). Tables are not blanked - their
+    text is read - and the table image is placed after it."""
+    from .ocr.glmocr import has_ink
+    H, W = img.shape[:2]
+    ocr_in = img.copy()
+    for g in graphics:
+        if g.kind != RegionKind.table:
+            x0, y0 = max(0, g.box.x0 - box.x0), max(0, g.box.y0 - box.y0)
+            x1, y1 = min(W, g.box.x1 - box.x0), min(H, g.box.y1 - box.y0)
+            ocr_in[y0:y1, x0:x1] = 255
+    for b in protect:                        # ...but never the question's own sentences
+        ocr_in[b.y0:b.y1, b.x0:b.x1] = img[b.y0:b.y1, b.x0:b.x1]
+    t, conf, looped = engine.read_text(ocr_in, ch) if has_ink(ocr_in) else ("", 1.0, False)
+    notes = ["the reader repeated itself on this crop - check the text"] if looped else []
+    lines = [ln.rstrip() for ln in t.strip("\n").splitlines()] if t.strip() else []
+    layout = place_figures(lines, ocr_in, graphics, local_boxes) if graphics else list(lines)
+    text = "\n".join(lines).strip("\n")
+    return text, "\n".join(layout).strip("\n"), round(conf if text else 1.0, 4), notes
+
+
+def _visual_rows(boxes: list[Box]) -> list[list]:
+    """Boxes side by side (overlapping in height) form one row: [[y0, y1, [indexes]], ...]."""
+    rows: list[list] = []
+    for i in sorted(range(len(boxes)), key=lambda k: boxes[k].y0):
+        b = boxes[i]
+        r = next((r for r in rows if min(b.y1, r[1]) - max(b.y0, r[0]) > 0.4 * min(b.h, r[1] - r[0])), None)
+        if r is None:
+            rows.append([b.y0, b.y1, [i]])
+        else:
+            r[0], r[1] = min(r[0], b.y0), max(r[1], b.y1)
+            r[2].append(i)
+    return sorted(rows, key=lambda r: r[0])
+
+
+def place_figures(lines: list[str], ocr_in: np.ndarray, graphics: list[FoundGraphic],
+                  local_boxes: list[Box]) -> list[str]:
+    """Layout lines: the text lines with each figure's marker at its height. The model gives
+    no positions, so line k is placed at the k-th visual text row of the (blanked) crop,
+    scaled when the counts differ. A row of drawings, each beside its own option label with
+    nothing else written ("A)  [drawing]   B)  [drawing]"), is a row of image options: each
+    marker goes right after its label."""
+    from .ocr.handseg import binarize, segment
+    lay = segment(binarize(ocr_in))
+    trows = _visual_rows(lay.line_boxes)
+    filled = [k for k, ln in enumerate(lines) if ln.strip()]
+    est: dict[int, float] = {}
+    for r, k in enumerate(filled):
+        if trows:
+            row = trows[min(len(trows) - 1, int(r * len(trows) / len(filled)))]
+            est[k] = (row[0] + row[1]) / 2
+        else:
+            est[k] = 0.0
+    out = list(lines)
+    after: dict[int, list[str]] = {}
+    # Option labels standing alone on their line ("A)") had a drawing as their content.
+    # They pair up, in reading order, with the LAST drawings of the crop (options come at the
+    # end of a question; a reaction scheme above them is a diagram of the question).
+    alone = [k for k in filled if re.fullmatch(r"\s*\(?[A-Da-d1-4][.)]\s*", out[k])]
+    order = [i for r in _visual_rows(local_boxes) for i in sorted(r[2], key=lambda j: local_boxes[j].x0)]
+    order = order[len(order) - len(alone):] if len(order) >= len(alone) else []
+    if len(alone) >= 2 and order and all(graphics[i].kind != RegionKind.table for i in order):
+        for k, i in zip(alone, order):
+            graphics[i].kind = RegionKind.option_image
+            out[k] = f"{out[k].strip()} {FIG % (i + 1)}"
+        return out
+    for y0, y1, ids in _visual_rows(local_boxes):
+        ids = sorted(ids, key=lambda i: local_boxes[i].x0)
+        span = [k for k in filled if y0 <= est[k] <= y1]
+        text = "\n".join(out[k] for k in span)
+        labels = list(OPT_TOKEN.finditer(text))
+        textless = len(re.sub(r"\s", "", OPT_TOKEN.sub("", text))) <= 3 * len(labels)
+        if len(ids) >= 2 and labels and len(labels) == len(ids) and textless:
+            for i in ids:
+                graphics[i].kind = RegionKind.option_image
+            it = iter(ids)
+            for k in span:
+                out[k] = OPT_TOKEN.sub(lambda m: f"{m.group(1)} {FIG % (next(it) + 1)}", out[k])
+            continue
+        cy = (y0 + y1) / 2
+        pos = span[-1] if span else max((k for k in filled if est[k] < cy), default=-1)
+        after.setdefault(pos, []).append("   ".join(FIG % (i + 1) for i in ids))
+    res = after.get(-1, [])
+    for k, ln in enumerate(out):
+        res.append(ln)
+        res += after.get(k, [])
+    return res
+
+
+def cut_edges(img: np.ndarray, ch: float) -> list[str]:
+    """Writing cut by the user's box edge: letters touching the top / bottom / side. The box is
+    never changed by the app - this only tells the user, so they can redraw it larger."""
+    from .ocr.handseg import binarize
+    bw = (binarize(img) > 0).astype(np.uint8)
+    H, W = bw.shape[:2]
+    n, _, st, _ = cv2.connectedComponentsWithStats(bw, 8)
+    ch = max(ch, 6.0)
+    marks = [s for s in st[1:] if s[3] >= 0.4 * ch and s[4] >= 10 and s[2] < 0.6 * W and s[3] < 0.6 * H]
+    top = sum(int(s[2]) for s in marks if s[1] <= 0)
+    bottom = sum(int(s[2]) for s in marks if s[1] + s[3] >= H)
+    left = sum(int(s[3]) for s in marks if s[0] <= 0)
+    right = sum(int(s[3]) for s in marks if s[0] + s[2] >= W)
+    out = []
+    for name, v in (("top", top), ("bottom", bottom), ("left", left), ("right", right)):
+        if v >= 1.5 * ch:
+            out.append(f"your box cuts through writing at the {name} edge - text there may be missing; "
+                       f"redraw the box (M) a little larger")
+    return out
+
+
+def looks_handwritten(img: np.ndarray, tess_conf: float) -> bool:
+    """Handwriting vs print for one crop. Tesseract reads print at 0.85+ and handwriting at
+    0.2-0.45; handwritten letters also vary in height far more (height_cv ~0.45 vs ~0.2).
+    The stroke classifier alone misses thick, even pens, so the signals are combined."""
+    from .ink import ink_features
+    from .ocr.handseg import binarize, segment
+    if tess_conf >= 0.8:
+        return False
+    bw = binarize(img)
+    lay = segment(bw)
+    kinds, hcv = [], []
+    for lb in lay.line_boxes:
+        if lb.w < 3 * lay.line_h:
+            continue
+        region = bw[lb.y0:lb.y1, lb.x0:lb.x1]
+        kinds.append(classify_ink(region)[0])
+        hcv.append(ink_features(region)["height_cv"])
+    if not kinds:
+        return False
+    frac = kinds.count("handwritten") / len(kinds)
+    h = float(np.median(hcv))
+    return frac >= 0.6 or (tess_conf < 0.6 and h >= 0.38) or (tess_conf < 0.45 and frac >= 0.3)
+
+
+HAND_LABEL = re.compile(r"^(\(?\s*(?:\d{1,3}|[A-Da-d]))\s+([.)\]])(?=\s|$)")
+
+
+def _analyze_handwritten(original: np.ndarray, page: int, box: Box, img: np.ndarray, blur: float,
+                         flag: str, find_graphics: bool) -> PartAnalysis | None:
+    """Handwritten crop: offline TrOCR (text) + TrOCR math (formulas), see ocr/trocr.py.
+    Drawings are found on the ink that is NOT part of a text line, so cursive words are
+    never mistaken for a diagram and a hand-drawn figure is cut out as its own locked image."""
+    from .ocr import get_engine
+    cfg = settings()
+    engine = get_engine(cfg["ocr"]["handwritten_engine"])
+    if engine.name != "trocr":
+        return None
+    unreadable = cfg["ocr"].get("unreadable_conf_handwritten", 0.1)
+    graphics: list[FoundGraphic] = []
+    local_boxes: list[Box] = []
+    text_boxes: list[Box] = []
+    if find_graphics:                                        # (no drawings -> nothing to blank)
+        graphics, local_boxes, text_boxes = _graphics_hand(original, box, img)
+
+    ocr_in = img.copy()                                      # OCR input only - the crop is untouched
+    for g in graphics:
+        if g.kind == RegionKind.diagram:
+            x0, y0 = max(0, g.box.x0 - box.x0), max(0, g.box.y0 - box.y0)
+            x1, y1 = min(img.shape[1], g.box.x1 - box.x0), min(img.shape[0], g.box.y1 - box.y0)
+            ocr_in[y0:y1, x0:x1] = 255
+    for b in text_boxes:                                     # a sentence a drawing's box overlaps stays
+        b = b.pad(2).clip(img.shape[1], img.shape[0])
+        ocr_in[b.y0:b.y1, b.x0:b.x1] = img[b.y0:b.y1, b.x0:b.x1]
+    res = engine.read(ocr_in)
+    for w in res.words:                                      # "7 )" -> "7)": spacing only
+        w.text = HAND_LABEL.sub(r"\1\2", w.text)
+
+    text = res.text(unreadable)
+    _mark_option_images(res, box, graphics, text, handwritten=True)
+    q_no = None
+    for ln in text.strip().splitlines()[:2]:
+        q_no = match_marker(ln, None, False)
+        if q_no is not None:
+            break
+    warnings = _edge_junk(res, img.shape[0], low=0.15)
+    if q_no is not None:
+        later = text.strip().splitlines()[2:]
+        if any(match_marker(ln, q_no + 1, False) == q_no + 1 for ln in later):
+            warnings.append(f"box also contains question {q_no + 1} - make it smaller")
+    layout = compose_layout(res, local_boxes, unreadable)
+    return PartAnalysis(page=page, box=box, image=img, text=text, confidence=res.confidence,
+                        source_type="handwritten", blur=blur, quality_flag=flag, q_no=q_no,
                         graphics=graphics, edge_warnings=warnings, layout=layout)
 
 
@@ -376,7 +775,8 @@ def compose_layout(res: OCRResult, figures: list[Box], unreadable: float, fix=No
     rows += fig_rows
     if not rows:
         return ""
-    widths = [(w.box.x1 - w.box.x0) / len(w.text) for w in res.words if w.conf > 0.5 and len(w.text) >= 3]
+    widths = [(w.box.x1 - w.box.x0) / len(w.text) for w in res.words if w.conf > 0.5 and len(w.text) >= 3] \
+        or [(w.box.x1 - w.box.x0) / len(w.text) for w in res.words if len(w.text) >= 3]
     cw = max(4.0, float(np.median(widths))) if widths else 12.0
     left = min(it[0] for r in rows for it in r["items"])
     out = []
@@ -427,7 +827,7 @@ def _reread_marker(img: np.ndarray, res: OCRResult) -> int | None:
     return None
 
 
-def _edge_junk(res: OCRResult, height: int) -> list[str]:
+def _edge_junk(res: OCRResult, height: int, low: float = 0.5) -> list[str]:
     """A low-confidence line touching the top/bottom edge usually means the box cuts through
     a neighbouring line. We never delete it (fidelity) - we flag it."""
     lines: dict[int, list] = {}
@@ -438,25 +838,36 @@ def _edge_junk(res: OCRResult, height: int) -> list[str]:
     ordered = sorted(lines.values(), key=lambda ws: min(w.box.y0 for w in ws))
     out = []
     first, last = ordered[0], ordered[-1]
-    if min(w.box.y0 for w in first) <= 3 and sum(w.conf for w in first) / len(first) < 0.5:
-        out.append("box cuts through other content at the top - redraw it or turn on Snap")
-    if max(w.box.y1 for w in last) >= height - 3 and sum(w.conf for w in last) / len(last) < 0.5:
-        out.append("box cuts through other content at the bottom - redraw it or turn on Snap")
+    if min(w.box.y0 for w in first) <= 3 and sum(w.conf for w in first) / len(first) < low:
+        out.append("box cuts through other content at the top - redraw it (M) a little larger or smaller")
+    if max(w.box.y1 for w in last) >= height - 3 and sum(w.conf for w in last) / len(last) < low:
+        out.append("box cuts through other content at the bottom - redraw it (M) a little larger or smaller")
     return out
 
 
-def _mark_option_images(res: OCRResult, box: Box, graphics: list[FoundGraphic], text: str) -> None:
+def _mark_option_images(res: OCRResult, box: Box, graphics: list[FoundGraphic], text: str,
+                        handwritten: bool = False) -> None:
     """Drawings at/after the option labels, when the options themselves have (almost) no text,
-    are image options - e.g. 'Which graph is correct? (1) [graph] (2) [graph] ...'."""
+    are image options - e.g. 'Which graph is correct? (1) [graph] (2) [graph] ...'.
+    handwritten: OCR of handwriting misreads text as a label now and then ("(* indicates" ->
+    "c) in"), so there each image option must sit right of its own label, in the same row."""
     diagrams = [g for g in graphics if g.kind == RegionKind.diagram]
     if len(diagrams) < 2:
         return
-    label_ys = sorted(w.box.y0 + box.y0 for w in res.words if OPTION_LABEL.match(w.text))
-    if len(label_ys) < 2:
+    # a handwriting "word" is a whole piece ("a) 1:1:1"), so a label may start a longer text
+    labels = [w for w in res.words if OPTION_LABEL.match(w.text) or (handwritten and OPTION_START.match(w.text))]
+    if len(labels) < 2:
         return
+    label_ys = sorted(w.box.y0 + box.y0 for w in labels)
     options = parse_question(text)["options"]
     textless = not options or sum(len(re.sub(r"^\(?\w[.)]\)?\s*", "", o)) < 4 for o in options) >= 2
-    cand = [g for g in diagrams if g.box.y1 >= label_ys[0]]
+    if handwritten:
+        def labelled(g):
+            return any(min(g.box.y1, w.box.y1 + box.y0) - max(g.box.y0, w.box.y0 + box.y0) > 0
+                       and w.box.x0 + box.x0 < g.box.x0 for w in labels)
+        cand = [g for g in diagrams if labelled(g)]
+    else:
+        cand = [g for g in diagrams if g.box.y1 >= label_ys[0]]
     if textless and len(cand) >= 2:
         for g in cand:
             g.kind = RegionKind.option_image

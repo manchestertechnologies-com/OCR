@@ -50,7 +50,8 @@ def roundtrip(project: Project, min_lost_area: int = 30) -> dict:
             covered[b.y0:b.y1, b.x0:b.x1] = True
         pixel_equal = bool(np.array_equal(canvas[covered], original[covered]))
         gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY) if original.ndim == 3 else original
-        ink = (gray < 160) & ~covered
+        from .paper import background_mask
+        ink = (gray < 160) & ~covered & ~background_mask(original)   # desk around a photographed sheet
         n, _, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), 8)
         lost = [dict(x0=int(s[0]), y0=int(s[1]), x1=int(s[0] + s[2]), y1=int(s[1] + s[3]),
                      area=int(s[4]))

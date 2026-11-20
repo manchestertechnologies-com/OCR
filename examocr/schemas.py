@@ -189,6 +189,7 @@ class Project(BaseModel):
     source_name: str
     created: str
     mode: str = "manual"             # manual: user crops | auto: model crops
+    script: str = "auto"             # auto | printed | handwritten - picks the OCR engine
     status: str = "processing"       # processing | ready | error
     error: Optional[str] = None
     pages: list[PageInfo] = Field(default_factory=list)

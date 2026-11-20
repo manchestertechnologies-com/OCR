@@ -27,10 +27,15 @@
         <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp">
         <span id="drop-text">Drop a PDF, scan or photo here, or click to choose</span>
       </label>
-      <fieldset class="mode">
-        <label><input type="radio" name="mode" value="manual" checked> I will crop the questions</label>
-        <label><input type="radio" name="mode" value="auto"> Auto-crop, then I will review</label>
-      </fieldset>
+      <p class="hint">You crop each question, diagram or passage yourself after upload. The app reads
+        exactly what is inside your box: text, formulas and the drawings in it.</p>
+      <label>Paper is
+        <select id="script">
+          <option value="auto" selected>Detect printed / handwritten</option>
+          <option value="printed">Printed</option>
+          <option value="handwritten">Handwritten</option>
+        </select>
+      </label>
       <p class="hint">A PDF or the original image works best. Screenshots and compressed photos lose detail.</p>
       <button type="submit" class="primary">Upload</button>
     </form>
@@ -67,8 +72,6 @@
     </label>
     <label>Subject <select id="cur-subject"><option value="">auto</option></select></label>
     <label>Passage <select id="cur-passage"><option value="">none</option></select></label>
-    <label title="Fit rough boxes to the question: drop half-cut lines and column dividers, include the question number">
-      <input type="checkbox" id="snap" checked> Snap to content</label>
     <button id="btn-verify">Run round-trip check</button>
     <a id="btn-export" class="button primary">Export ZIP</a>
   </div>
@@ -82,7 +85,7 @@
       <p class="hint">Drag a box around a question; its text, diagrams, options and type are extracted.
         Keys: <b>Q</b> question · <b>P</b> next part · <b>D</b> diagram · <b>T</b> table · <b>I</b> image option ·
         <b>A</b> passage · <b>M</b> move box · <b>Esc</b> select · <b>←/→</b> page.</p>
-      <p id="busy" class="busy" hidden>Analyzing crop…</p>
+      <p id="busy" class="busy" hidden>Reading your crop… (the OCR model runs on this computer: about 30-90 s per question)</p>
     </div>
     <div class="pane side">
       <div class="filters">

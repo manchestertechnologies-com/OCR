@@ -11,14 +11,29 @@ quality:
   contrast_min: 25.0       # std-dev of grey levels
 
 ocr:
-  printed_engine: tesseract     # tesseract | paddle
-  handwritten_engine: tesseract # tesseract | trocr  (trocr needs requirements-ml.txt)
+  # glm = GLM-OCR, an offline 0.9B document-OCR model: printed text, handwriting, formulas and
+  # tables. Accurate, ~30-90 s per question on a laptop CPU. Needs torch, torchvision and
+  # transformers (see README); without them the app falls back to Tesseract.
+  printed_engine: glm           # glm | tesseract (fast, printed only, weak on formulas) | paddle
+  handwritten_engine: glm       # glm | trocr (older line-by-line model) | tesseract
+  glm_model: zai-org/GLM-OCR    # downloaded once (~2.6 GB): python -m examocr.cli download-models
+  glm_dtype: float32            # float32 is fastest on CPUs without bfloat16 (most laptops)
+  glm_letter_px: 16             # crops are scaled so letters are ~this tall (never enlarged)
+  glm_threads: 0                # 0 = number of physical CPU cores
+  # TrOCR (only when handwritten_engine: trocr). Set trocr_math_model: "" to skip formulas.
+  trocr_model: microsoft/trocr-base-handwritten
+  trocr_math_model: fhswf/TrOCR_Math_handwritten   # handwritten formulas -> LaTeX -> H₂ + Hg²⁺
+  trocr_beams: 1                # 3 = a little more accurate, ~60% slower
+  low_memory: auto              # true: formula model in bfloat16 (half RAM). auto = under 12 GB RAM
   tesseract_lang: eng           # e.g. eng+hin+mar+kan for bilingual CET papers
   confidence_review: 0.80       # below this -> needs_review
   unreadable_conf: 0.30         # words below this are output as [?]
 
 layout:
-  engine: heuristic             # heuristic | yolo
+  engine: heuristic             # heuristic | yolo  (auto-crop only)
+  # Figures inside the user's box: a trained layout model (offline, ~130 MB, ~5 s per crop)
+  # finds drawings, hand-drawn structures and tables; "" = ink rules only
+  figure_model: PaddlePaddle/PP-DocLayoutV3_safetensors
   yolo_weights: models/layout_yolov8.pt
   yolo_conf: 0.35
   diagram_min_area_frac: 0.004  # non-text blobs larger than this fraction of page -> diagram

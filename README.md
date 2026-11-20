@@ -1,9 +1,10 @@
 # Exam Paper OCR
 
-Upload a JEE, NEET or CET question paper (PDF, scan or photo). The app crops every
-question, passage, diagram and table from the **original page**, reads it with OCR
-verbatim, and labels its type. A reviewer can then fix crops and text without ever
-changing the locked originals.
+Upload a JEE, NEET or CET question paper (PDF, scan or photo; printed or handwritten).
+**You crop** each question, passage, diagram or table on the original page; the app uses your
+box exactly as drawn. It reads everything inside it (text, formulas, tables) with an offline
+OCR model, cuts out each drawing inside it as its own locked image, and labels the question
+type. A reviewer can then fix text and crops without ever changing the locked originals.
 
 > **Team guidance:** add your work to this repository and push to the `main` branch only.
 > Don't push to other branches.
@@ -29,12 +30,41 @@ C:\Users\DELL\.venvs\examocr\Scripts\python -m pytest tests
 For bilingual CET papers, install the Tesseract language packs and set `ocr.tesseract_lang`
 (for example `eng+mar` or `eng+kan`) in `configs/default.yaml`.
 
+### The OCR models (offline, one-time download)
+
+Text, handwriting, formulas and tables are read by **GLM-OCR** (`zai-org/GLM-OCR`, 0.9B, MIT
+licence), a document-OCR model that runs on this computer's CPU. Drawings inside your box are
+found by **PP-DocLayoutV3** (`PaddlePaddle/PP-DocLayoutV3_safetensors`, Apache-2.0). No
+internet is needed after the first download (~2.8 GB in total; ~4 GB RAM while running).
+
+```powershell
+C:\Users\DELL\.venvs\examocr\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+C:\Users\DELL\.venvs\examocr\Scripts\pip install "transformers>=5.2"
+C:\Users\DELL\.venvs\examocr\Scripts\python -m examocr.cli download-models
+```
+
+- Formulas are written as plain text: `K₂MnO₄ + MnO₂ + O₂`, `NBS/AIBN →(Heat; CCl₄)`, `M/3`,
+  `CH₃-C≡CH`. Unknown LaTeX is kept as written, never guessed.
+- Drawings (ring structures, hand-drawn structural formulas, graphs, apparatus) are cut out as
+  locked images. Reagents written over a reaction arrow stay text. A row of drawings that each
+  sit next to their own option label ("A) [drawing] B) [drawing]") become **image options**.
+- Speed on a laptop CPU (4 cores): about 30-90 s per question. The models load once at server
+  start (~40 s). Without torch/transformers the app falls back to Tesseract (printed only).
+- At upload, **Paper is** *Detect* works for most papers. Choose *Handwritten* or *Printed* if
+  detection picks wrong.
+- Settings in `configs/default.yaml`: `ocr.printed_engine` / `ocr.handwritten_engine`
+  (`glm` | `tesseract` | `trocr`), `glm_letter_px` (letters are scaled to this height; higher is
+  slower), `layout.figure_model` (`""` = ink rules only).
+- Review still matters: messy writing can be misread (a handwritten `5]` read as `3)`). Every
+  low-confidence or suspicious crop is flagged with the reason.
+
 ## Using the web app
 
-1. **Upload.** Choose the exam and keep **"I will crop the questions"** selected. The pages
-   load in a few seconds. Nothing is auto-cropped.
-2. **Crop.** Drag a box around a question; a loose box is fine. For each box the app:
-   - reads the text verbatim and finds the question number on the first line
+1. **Upload.** Choose the exam. The pages load in a few seconds. Nothing is cropped by the app.
+2. **Crop.** Drag a box around a question. **Your box is used exactly as drawn**: the app never
+   moves, shrinks or extends it. If writing touches your box edge, or the box runs into the next
+   question, the app tells you, so you can redraw it (M). For each box the app:
+   - reads the text and formulas and finds the question number on the first line
    - finds every **diagram and table inside the box** and saves each as its own locked image.
      Diagram labels are kept out of the question text, and a diagram that touches your box
      edge is flagged so you can widen the box.
@@ -49,7 +79,7 @@ For bilingual CET papers, install the Tesseract language packs and set `ocr.tess
    - **D / T / I:** add a missed diagram, table or image option
    - **A:** passage. Pick it in the "Passage" box and the next questions link to it.
    - **S / H:** section heading or header
-   - **M:** move the box. The app re-analyzes it and keeps the old crop.
+   - **M:** redraw the box. The app reads the new box and keeps the old crop for undo.
    - **Esc:** select mode
    - **← / →:** change page
 4. **Review.** The original crop is on the left (locked) and the editable copy is on the right.
@@ -60,8 +90,8 @@ For bilingual CET papers, install the Tesseract language packs and set `ocr.tess
 6. **Export ZIP.** You get `questions.json`, `crops.json` and every PNG. Export is blocked if
    any original has changed.
 
-If you want the app to propose all the crops first, choose "Auto-crop" at upload. Those crops
-go through the same analyzer, and you can then fix them the same way.
+The command line (`process --mode auto`) can still auto-crop a whole paper for batch work; the
+web app does not.
 
 ## Folder structure
 
@@ -76,12 +106,16 @@ new ocr/
 │   ├── preprocess.py         working copy for detection only: shadow removal, denoise, deskew + inverse map
 │   ├── ink.py                printed vs handwritten classification per line
 │   ├── layout/
-│   │   ├── heuristic.py      column/zone detection, text lines, diagram + table detection
+│   │   ├── docmodel.py       PP-DocLayoutV3: drawings / tables inside the user's box
+│   │   ├── heuristic.py      column/zone detection, text lines, diagram + table detection (ink rules)
 │   │   └── yolo.py           optional trained YOLOv8 layout detector
 │   ├── ocr/
-│   │   ├── tesseract.py      default engine (dictionary correction OFF, so text stays verbatim)
+│   │   ├── glmocr.py         GLM-OCR: printed + handwritten text, formulas, tables (default)
+│   │   ├── latex.py          the model's Markdown/LaTeX -> plain text (H₂O, M/3, →)
+│   │   ├── tesseract.py      fast engine (dictionary correction OFF); finds printed word boxes
 │   │   ├── paddle.py         optional PaddleOCR (printed text, Indic scripts)
-│   │   ├── trocr.py          optional TrOCR (handwriting, line by line)
+│   │   ├── trocr.py          optional older TrOCR (handwriting, line by line)
+│   │   ├── handseg.py        handwritten line / piece segmentation
 │   │   └── router.py         sends each region to the right engine, falls back safely
 │   ├── segment.py            question markers, sections, passages, multi-column/page continuations
 │   ├── parse.py              options and statements (always exact substrings of the OCR text)
@@ -111,8 +145,11 @@ new ocr/
 - The deskewed and denoised working copy is used only to find boxes. Boxes are mapped back
   through the inverse transform before cutting.
 - Originals are written once, made read-only and hashed. Writing over one raises an error.
-- OCR runs with Tesseract's dictionaries off, so words are not "corrected". Low-confidence
-  words become `[?]`, never a guess.
+- The user's box is never changed. The app only reads what is inside it and warns when writing
+  is cut at the box edge.
+- OCR output is never "corrected" afterwards. With Tesseract, low-confidence words become `[?]`;
+  with GLM-OCR, a crop below the confidence threshold or a reading that repeats itself is flagged
+  for review.
 - Diagram boxes grow to follow dashed lines, arrowheads and small labels. Any diagram whose
   ink touches its crop edge is flagged as possibly cut off.
 - Anything uncertain sets `needs_review` and lists the reasons. Nothing is fixed silently.

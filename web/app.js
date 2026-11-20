@@ -63,7 +63,8 @@ $("#upload-form").onsubmit = async (e) => {
     return;
   }
   const fd = new FormData(); fd.append("file", f); fd.append("exam", $("#exam").value);
-  fd.append("mode", document.querySelector("input[name=mode]:checked").value);
+  fd.append("mode", "manual");             // the user crops; the app never auto-crops
+  fd.append("script", $("#script").value);
   $("#progress").hidden = false; $("#progress-msg").textContent = "Uploading…";
   $("#bar-fill").style.width = "0%";
   setUploading(true);                     // a second click would create a duplicate paper
@@ -212,7 +213,7 @@ function renderDetail() {
   c.textContent = `type ${(q.type_confidence * 100).toFixed(0)}% · OCR ${(q.ocr_confidence * 100).toFixed(0)}% · ${q.quality_flag}`;
   $("#d-signals").textContent = q.type_signals.length ? "Why: " + q.type_signals.join(" · ") : "";
   const snapNotes = q.parts.flatMap((p) => P.crops.find((c) => c.id === p.crop_id)?.snap_notes ?? []);
-  $("#d-snap").textContent = snapNotes.length ? "Box snapped: " + [...new Set(snapNotes)].join(" · ") : "";
+  $("#d-snap").textContent = snapNotes.length ? "Box snapped (older crop): " + [...new Set(snapNotes)].join(" · ") : "";
   $("#d-passage").value = q.passage_id ?? "";
   $("#d-reasons").innerHTML = q.review_reasons.map((r) => `<li>${esc(r)}</li>`).join("");
   $("#d-crops").innerHTML = q.parts.map((p, i) => `<div class="part"><span>Part ${i + 1} · page ${p.page}</span>` +
@@ -316,14 +317,27 @@ ed.addEventListener("drop", (e) => {
   updateDiff();
 });
 
+// One action at a time: reading a crop takes a minute, and a second box drawn meanwhile only
+// waits in a queue on the server (it looked stuck, and the same box got drawn twice).
+let working = false;
 async function act(fn) {
-  $("#busy").hidden = false;
+  if (working) { flashBusy(); return; }
+  working = true;
+  const t0 = Date.now(), busy = $("#busy");
+  const tick = () => { busy.textContent = `Reading your crop… ${Math.round((Date.now() - t0) / 1000)} s ` +
+    "(the OCR model runs on this computer: about 30-90 s per question). Please wait."; };
+  tick(); busy.hidden = false;
+  const timer = setInterval(tick, 1000);
   try {
     await fn(); await openProject(P.id, true);
     const nextP = $("#cur-passage").dataset.next;           // new passage -> make it current
     if (nextP) { $("#cur-passage").value = nextP; delete $("#cur-passage").dataset.next; }
   } catch (e) { alert(e.message); }
-  finally { $("#busy").hidden = true; }
+  finally { clearInterval(timer); busy.hidden = true; working = false; }
+}
+function flashBusy() {
+  const b = $("#busy");
+  b.classList.remove("flash"); void b.offsetWidth; b.classList.add("flash");
 }
 const qurl = (suffix) => `/api/projects/${P.id}/questions/${selected}/${suffix}`;
 $("#b-save").onclick = () => act(() => api(qurl("text"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: getEditor() }) }));
@@ -373,6 +387,7 @@ function toPage(e) {
 }
 ov.addEventListener("pointerdown", (e) => {
   if (!drawMode()) return;
+  if (working) { e.preventDefault(); flashBusy(); return; }   // still reading the last box
   e.preventDefault(); ov.setPointerCapture(e.pointerId);
   start = toPage(e); rubber = document.createElement("div"); rubber.className = "rubber"; ov.appendChild(rubber);
 });
@@ -400,13 +415,12 @@ ov.addEventListener("pointerup", async (e) => {
         (Math.hypot((p.box.x0 + p.box.x1) / 2 - cx, (p.box.y0 + p.box.y1) / 2 - cy) <
          Math.hypot((q.parts[best].box.x0 + q.parts[best].box.x1) / 2 - cx, (q.parts[best].box.y0 + q.parts[best].box.y1) / 2 - cy) ? i : best), part);
     }
-    return act(() => api(qurl("recrop") + `?part=${part}&snap=${$("#snap").checked}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(box) }));
+    return act(() => api(qurl("recrop") + `?part=${part}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(box) }));
   }
   act(async () => {
     const r = await api(`/api/projects/${P.id}/crops`, { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ page, box, kind: mode, parent_id: needsQ ? selected : null,
-        subject: $("#cur-subject").value || null, passage_id: mode === "question" ? ($("#cur-passage").value || null) : null,
-        snap: $("#snap").checked }) });
+        subject: $("#cur-subject").value || null, passage_id: mode === "question" ? ($("#cur-passage").value || null) : null }) });
     if (r.question) selected = r.question.id;
     if (mode === "passage" && r.crop?.passage_id) $("#cur-passage").dataset.next = r.crop.passage_id;
   });

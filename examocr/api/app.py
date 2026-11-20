@@ -27,10 +27,48 @@ from ..verify import hash_check, roundtrip
 @asynccontextmanager
 async def lifespan(_app):
     store.mark_interrupted()
+    from ..ocr.router import preload_models
+    preload_models()
     yield
 
 
 app = FastAPI(title="Exam paper OCR", lifespan=lifespan)
+
+
+class QuietShutdown:
+    """Ctrl+C cancels the requests still running (a crop being read takes a minute). That is
+    expected, not an error: end them quietly instead of printing a traceback for each one."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        import asyncio
+        started = False
+
+        async def track(msg):
+            nonlocal started
+            started = started or msg["type"] == "http.response.start"
+            await send(msg)
+        try:
+            await self.inner(scope, receive, track)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            if scope["type"] != "http":
+                return
+            import logging
+            logging.getLogger("uvicorn.error").info("stopped while %s %s was running",
+                                                    scope.get("method"), scope.get("path"))
+            if not started:
+                try:
+                    await send({"type": "http.response.start", "status": 503,
+                                "headers": [(b"content-type", b"application/json")]})
+                    await send({"type": "http.response.body",
+                                "body": b'{"detail": "The server was stopped. Start it again and redraw this box."}'})
+                except Exception:
+                    pass
+
+
+app.add_middleware(QuietShutdown)
 WEB = ROOT / "web"
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 
@@ -82,7 +120,8 @@ def exam_info(exam: str):
 
 
 @app.post("/api/projects")
-async def upload(file: UploadFile = File(...), exam: str = Form(...), mode: str = Form("manual")):
+async def upload(file: UploadFile = File(...), exam: str = Form(...), mode: str = Form("manual"),
+                 script: str = Form("auto")):
     name = Path(file.filename or "upload").name
     ext = Path(name).suffix.lower()
     if ext != ".pdf" and ext not in IMAGE_EXT:
@@ -96,7 +135,7 @@ async def upload(file: UploadFile = File(...), exam: str = Form(...), mode: str 
         tmp = Path(td) / name
         tmp.write_bytes(data)
         try:
-            pr = pipeline.create_project(tmp, exam, mode)
+            pr = pipeline.create_project(tmp, exam, mode, script)
         except ValueError as e:          # e.g. an unknown mode: a bad request, not a server crash
             raise HTTPException(400, str(e)) from None
     PROGRESS[pr.id] = {"message": "queued", "fraction": 0.0}
@@ -163,7 +202,7 @@ class ManualCrop(BaseModel):
     q_no: int | None = None
     subject: str | None = None
     passage_id: str | None = None
-    snap: bool = True
+    snap: bool = False       # the user's box is final; True fits it to the content (old behaviour)
 
 
 def _wrap(fn, *a):
@@ -207,7 +246,7 @@ def reset(pid: str, qid: str):
 
 
 @app.post("/api/projects/{pid}/questions/{qid}/recrop")
-def recrop(pid: str, qid: str, body: BoxIn, part: int = 0, snap: bool = True):
+def recrop(pid: str, qid: str, body: BoxIn, part: int = 0, snap: bool = False):
     return _wrap(store.recrop, pid, qid, Box(**body.model_dump()), part, snap)
 
 

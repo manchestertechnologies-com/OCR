@@ -204,7 +204,7 @@ def attach_part(pr: Project, original: np.ndarray, q: QuestionRecord, page_no: i
     user_box, notes = box, []
     if snap:
         box, notes = snap_box(original, box, include_marker=True)
-    pa = analyze_part(original, page_no, box)
+    pa = analyze_part(original, page_no, box, script=pr.script)
     k = len([c for c in pr.crops if c.parent_id == q.id and c.kind == RegionKind.question]) + 1
     c, _ = _save_crop(pr, original, RegionKind.question, page_no, pa.box,
                       q.id if k == 1 else f"{q.id}_part{k}", parent=q.id)
@@ -254,8 +254,9 @@ def _default_subject(pr: Project, page_no: int, box: Box) -> str | None:
 # ---------------------------------------------------------------- user actions
 def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str | None = None,
                     q_no: int | None = None, subject: str | None = None,
-                    passage_id: str | None = None, snap: bool = True) -> dict:
-    """A box drawn by the user.
+                    passage_id: str | None = None, snap: bool = False) -> dict:
+    """A box drawn by the user. It is used exactly as drawn (snap=False): the user crops,
+    the app only reads what is inside.
       question            -> new question, fully analyzed (text, images inside, type, number)
       part                -> continuation of question parent_id (next column / next page)
       diagram/table/option_image -> extra image for question parent_id
@@ -317,7 +318,7 @@ def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str 
                 box, notes = snap_box(original, box, include_marker=False)
             c, img = _save_crop(pr, original, k, page_no, box, f"{kind}_{len(pr.crops) + 1:04d}")
             c.user_box, c.snap_notes = (user_box, notes) if snap else (None, [])
-            pa = analyze_part(original, page_no, box)
+            pa = analyze_part(original, page_no, box, script=pr.script)
             c.text, c.ocr_confidence = pa.text, pa.confidence
             first_line = pa.text.strip().splitlines()[0][:40] if pa.text.strip() else None
             c.subject = subject or (first_line if k == RegionKind.section else None)
@@ -334,7 +335,7 @@ def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str 
         return result
 
 
-def recrop(pid: str, qid: str, box: Box, part_index: int = 0, snap: bool = True) -> QuestionRecord:
+def recrop(pid: str, qid: str, box: Box, part_index: int = 0, snap: bool = False) -> QuestionRecord:
     """Move/resize a question box: cut a NEW crop from the original and re-analyze it.
     The old crop (and the images extracted from it) is kept and can be restored with undo."""
     from .analyze import assemble_question

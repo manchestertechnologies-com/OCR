@@ -12,6 +12,7 @@ OPT_PATTERNS = [
     re.compile(r"(?:^|(?<=\s))\(([a-d])\)\s*"),          # (a)
     re.compile(r"(?:^|(?<=\s))([A-D])[.)]\s+"),          # A.  A)
     re.compile(r"(?:^|(?<=\s))([1-4])[.)]\s+"),          # 1.  1)
+    re.compile(r"(?:^|(?<=\s))([a-d])\)\s*"),            # a)  (common in handwritten papers)
 ]
 STATEMENT_START = re.compile(
     r"^\s*(statement\s*[-–]?\s*(?:I{1,3}|IV|\d)\b|assertion\b|reason\b|\(?(?:i{1,3}|iv|v)\)|"
