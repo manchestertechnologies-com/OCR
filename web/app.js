@@ -202,6 +202,13 @@ function select(qid) {
 }
 
 const file = (rel) => `/api/projects/${P.id}/file/${rel}?t=${Date.now() % 1e7}`;
+// a figure is shown as the clean drawing (dark on white); click it to see the locked photo crop
+function figImg(path) {
+  const c = P.crops.find((x) => x.path === path);
+  const shown = c?.clean_path || path;
+  return `<a href="${file(path)}" target="_blank" title="clean drawing - click for the original photo crop">` +
+    `<img class="clean" src="${file(shown)}"></a>`;
+}
 
 function renderDetail() {
   const q = P.questions.find((x) => x.id === selected);
@@ -219,8 +226,8 @@ function renderDetail() {
   $("#d-crops").innerHTML = q.parts.map((p, i) => `<div class="part"><span>Part ${i + 1} · page ${p.page}</span>` +
       (q.parts.length > 1 ? `<button class="link" data-rmpart="${i}">remove</button>` : "") +
       `<img src="${file(p.crop_path)}" alt="original crop"></div>`).join("") +
-    (q.diagram_paths.length ? "<h4>Diagrams (locked)</h4>" + q.diagram_paths.map((d) => `<img src="${file(d)}">`).join("") : "") +
-    (q.option_images.length ? "<h4>Image options (locked)</h4>" + q.option_images.map((d) => `<img src="${file(d)}">`).join("") : "");
+    (q.diagram_paths.length ? "<h4>Diagrams</h4>" + q.diagram_paths.map(figImg).join("") : "") +
+    (q.option_images.length ? "<h4>Image options</h4>" + q.option_images.map(figImg).join("") : "");
   $("#d-ocr").textContent = q.text;
   $("#d-qtype").value = q.question_type;
   $("#d-qno").value = q.q_no ?? "";

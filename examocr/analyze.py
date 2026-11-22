@@ -731,7 +731,10 @@ def _build_display(q: QuestionRecord, children: list, order) -> None:
                 out.append(ln)
     out += [name(cid) for cid in extra]
     q.display_text = "\n".join(out).strip("\n")
-    q.figures = [{"label": label[cid], "path": by_id[cid].path} for cid in ids]
+    # shown and exported: the clean drawing (no paper / shadows); the locked photo crop stays
+    # available as "original"
+    q.figures = [{"label": label[cid], "path": by_id[cid].clean_path or by_id[cid].path,
+                  "original": by_id[cid].path} for cid in ids]
 
 
 def compose_layout(res: OCRResult, figures: list[Box], unreadable: float, fix=None) -> str:
@@ -871,6 +874,13 @@ def _mark_option_images(res: OCRResult, box: Box, graphics: list[FoundGraphic], 
     if textless and len(cand) >= 2:
         for g in cand:
             g.kind = RegionKind.option_image
+
+
+def refresh_figures(pr: Project, q: QuestionRecord) -> None:
+    """Rebuild only q.figures / q.display_text (e.g. after clean copies were added)."""
+    children = [c for c in pr.crops if c.parent_id == q.id and not c.superseded
+                and c.kind in (RegionKind.diagram, RegionKind.table, RegionKind.option_image)]
+    _build_display(q, children, lambda c: (c.page, c.box.y0 // 40, c.box.x0))
 
 
 def assemble_question(pr: Project, q: QuestionRecord) -> QuestionRecord:

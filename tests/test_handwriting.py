@@ -20,7 +20,7 @@ def _font(size):
 
 def test_latex_to_plain_text():
     assert latex_to_text(r"H_{2}+Hg^{2+}\rightleftharpoons2Hg+2H^{+}") == "H₂ + Hg²⁺ ⇌ 2Hg + 2H⁺"
-    assert latex_to_text(r"-6.27\times10^{4}J") == "-6.27×10⁴J"
+    assert latex_to_text(r"-6.27\times10^{4}J") == "-6.27×10⁴ J"            # unit after a power: spaced
     assert latex_to_text(r"K_{2}MnO_{4}+MnO_{2}+O_{2}") == "K₂MnO₄ + MnO₂ + O₂"
     assert latex_to_text(r"\frac{M}{3}") == "M/3"
     assert latex_to_text(r"25^{\circ}C") == "25°C"

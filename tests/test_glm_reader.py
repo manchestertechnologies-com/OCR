@@ -121,3 +121,50 @@ def test_option_labels_pair_with_drawings():
     graphics = [FoundGraphic(kind=RegionKind.diagram, box=b) for b in [scheme] + boxes]
     out = place_figures(lines, ocr_in, graphics, [scheme] + boxes)
     assert graphics[0].kind == RegionKind.diagram and out[1] == "A) {{fig:2}}"
+
+
+def test_formula_has_no_backslash():
+    # handwritten "sec⁻¹ mol⁻¹ L" read as the LaTeX command \sec (secant)
+    assert markdown_to_text(r"a) $\sec^{-1}$") == "a) sec⁻¹"
+    assert markdown_to_text(r"b) $\sec^{-1} mol L^{-1}$") == "b) sec⁻¹ mol L⁻¹"
+    assert markdown_to_text(r"c) $\sec^{-1}mol^{-1}L$") == "c) sec⁻¹ mol⁻¹ L"
+    assert markdown_to_text(r"$\Delta H = -57 kJ mol^{-1}$") == "ΔH = -57 kJ mol⁻¹"
+    assert markdown_to_text(r"$\log K$ and \unknown{x}") == "log K and unknownx"
+    for s in (r"$\sec^{-1}\mathrm{mol}^{-3}L^{-1}$", r"\textbf{A} \foo", r"$\alpha \beta$"):
+        assert "\\" not in markdown_to_text(s)
+
+
+def test_slanted_reaction_arrow_is_text():
+    import cv2
+    reagents = np.zeros((160, 300), np.uint8)
+    cv2.putText(reagents, "i) NaNH2", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.1, 255, 3)
+    cv2.line(reagents, (20, 75), (290, 62), 255, 4)               # slanted, touching letters
+    cv2.line(reagents, (60, 60), (60, 75), 255, 3)
+    cv2.putText(reagents, "ii) CH3Br", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 1.1, 255, 3)
+    assert has_arrow(reagents > 0)
+    graph = np.zeros((200, 300), np.uint8)
+    cv2.line(graph, (20, 180), (290, 180), 255, 3)                # x axis
+    cv2.line(graph, (20, 180), (20, 10), 255, 3)                  # y axis -> a drawing
+    cv2.line(graph, (20, 180), (280, 30), 255, 3)
+    assert not has_arrow(graph > 0)
+
+
+def test_clean_drawing_removes_the_photo():
+    import cv2
+
+    from examocr.clean import clean_drawing
+    rng = np.random.default_rng(0)
+    H, W = 200, 300
+    shade = np.linspace(170, 215, W)[None, :].repeat(H, 0)       # grey paper, uneven light
+    photo = (shade + rng.normal(0, 3, (H, W))).astype(np.float32)
+    lines = np.zeros((H, W), np.uint8)
+    cv2.line(lines, (30, 150), (150, 40), 255, 3)                  # a dark bond
+    cv2.line(lines, (160, 100), (270, 100), 255, 2)                # a faint pencil bond
+    photo[lines > 0] -= np.where(np.arange(W)[None, :] > 155, 25, 110).repeat(H, 0)[lines > 0]
+    img = cv2.cvtColor(np.clip(photo, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    out = clean_drawing(img)
+    paper = lines == 0
+    far = cv2.dilate(lines, np.ones((7, 7), np.uint8)) == 0
+    assert (out[far] == 255).mean() > 0.995                        # paper, shading, grain -> white
+    assert out[100, 200] <= 150 and out[95, 90] <= 100             # both bonds kept, dark
+    assert paper.any()

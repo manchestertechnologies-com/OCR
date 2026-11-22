@@ -178,5 +178,17 @@ def has_arrow(region: np.ndarray) -> bool:
         return False
     n, _, st, _ = cv2.connectedComponentsWithStats(region.astype(np.uint8), 8)
     H, W = region.shape[:2]
-    return any(st[i, 2] >= 0.45 * W and st[i, 3] <= max(0.25 * H, 3) and st[i, 2] >= 6 * st[i, 3]
-               for i in range(1, n))
+    if any(st[i, 2] >= 0.45 * W and st[i, 3] <= max(0.25 * H, 3) and st[i, 2] >= 6 * st[i, 3]
+           for i in range(1, n)):
+        return True
+    # a hand-drawn arrow is often slanted and touches the reagents' letters, so it is not a
+    # stroke of its own: look for a long, nearly flat straight line. A long vertical line
+    # too means axes (a graph), which is a drawing.
+    lines = cv2.HoughLinesP(region.astype(np.uint8) * 255, 1, np.pi / 180, threshold=max(20, int(0.25 * W)),
+                            minLineLength=int(0.4 * W), maxLineGap=max(3, int(0.04 * W)))
+    flat = vert = False
+    for x1, y1, x2, y2 in (lines.reshape(-1, 4) if lines is not None else []):
+        dx, dy = abs(int(x2) - int(x1)), abs(int(y2) - int(y1))
+        flat |= dy <= 0.27 * dx and dx >= 0.4 * W
+        vert |= dx <= 0.27 * dy and dy >= 0.5 * H
+    return flat and not vert

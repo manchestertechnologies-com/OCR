@@ -37,6 +37,18 @@ _GROUP = r"\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}"
 _OPT = r"\[((?:[^\[\]]|\[[^\[\]]*\])*)\]"
 
 
+FUNCS = ("arcsin|arccos|arctan|sinh|cosh|tanh|sin|cos|tan|cot|sec|csc|log|ln|lg|exp|lim|max|min|"
+         "sup|inf|det|deg|arg|dim|ker|gcd|bmod|pmod|mod")
+SUPERSCRIPTS = "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻"
+
+
+def no_backslash(s: str) -> str:
+    """No LaTeX may reach the question text: a command still left ("\\unknown") keeps its
+    word, and a stray backslash goes."""
+    s = re.sub(r"\\([A-Za-z]+)", r"\1", s)
+    return re.sub(r"\\(?=\S)|\\$", "", s)
+
+
 def latex_to_text(s: str) -> str:
     """Readable plain text from LaTeX. Superscripts/subscripts become Unicode when every
     character has a Unicode form, otherwise ^(...) / _(...)."""
@@ -71,6 +83,8 @@ def latex_to_text(s: str) -> str:
     s = re.sub(r"\\(left|right|big|Big|bigg|Bigg)\b\s*", "", s)
     s = re.sub(r"\\(?:,|;|:|!|quad|qquad|space)|~", " ", s)
     s = re.sub(r"\^\s*\{\s*\\circ\s*\}|\^\s*\\circ", "°", s)
+    # function names the model writes as commands: \sec^{-1} (seconds!) -> sec⁻¹, \log -> log
+    s = re.sub(r"\\(" + FUNCS + r")(?![a-z])", r"\1", s)
     for cmd in sorted(SYMBOLS, key=len, reverse=True):
         s = re.sub(re.escape(cmd) + r"(?![a-z])", lambda _m, v=SYMBOLS[cmd]: v, s)
     s = re.sub(r"\^\s*" + _GROUP, lambda m: _script(m.group(1), SUP, "^"), s)
@@ -82,6 +96,8 @@ def latex_to_text(s: str) -> str:
     s = re.sub(r"(?<=[\d)])\s*×\s*(?=10)", "×", s)              # but keep 6.27×10⁴ together
     s = re.sub(r"(^|[(\s])\s*-\s+", r"\1-", s)                  # leading minus sign
     s = re.sub(r"([→←]) \(", r"\1(", s)                          # →(Heat; CCl₄) stays one token
+    s = no_backslash(s)
+    s = re.sub("([" + SUPERSCRIPTS + "]+)(?=[A-Za-z])", r"\1 ", s)  # sec⁻¹mol⁻¹L -> sec⁻¹ mol⁻¹ L
     return "\n".join(re.sub(r"[ \t]+", " ", ln).strip() for ln in s.split("\n")).strip()
 
 
@@ -141,7 +157,7 @@ def markdown_to_text(md: str) -> str:
             ln = "   ".join(c.strip() for c in ln.strip().strip("|").split("|"))
         if re.search(r"\\[A-Za-z]{2,}|[_^]\{", ln):                 # LaTeX written outside $...$
             ln = latex_to_text(ln)
-        out.append(ln.rstrip())
+        out.append(no_backslash(ln).rstrip())
     text = "\n".join(out)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip("\n")
@@ -159,7 +175,15 @@ def math_spaces(body: str) -> str:
     # "\equiv C" -> "\equiv{}C" (the symbol needs no space); other commands keep one
     s = re.sub(r"(\\[A-Za-z]+)\s+(?=[A-Za-z0-9])",
                lambda m: m.group(1) + "{}" if m.group(1) in SYMBOLS else hold(m), s)
-    s = re.sub(r"\s+", "", s)
+    def space(m):
+        # a space next to a word of 2+ small letters is a real gap: units ("mol L",
+        # "sec^{-1} mol"), not a formula's letters ("C H_3" -> CH₃, "Na N H_2")
+        before = re.sub(r"(?:[\^_](?:\{[^{}]*\}|\S)|\}|\x00\d+\x00)+$", "", s[:m.start()])
+        after = re.sub(r"^\\(?:mathrm|mathit|text|textrm|operatorname)\{", "", s[m.end():])
+        word = re.search(r"[a-z]{2,}$", before) or re.match(r"[a-z]{2,}", after) \
+            or (re.search(r"\d$", before) and re.match(r"[a-z]", after))       # "57 kJ", "2 g"
+        return " " if word else ""
+    s = re.sub(r"\s+", space, s)
     return re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], s)
 
 

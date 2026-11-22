@@ -123,7 +123,8 @@ def test_display_text_keeps_layout_and_places_diagram(project):
     assert shown.splitlines()[0].lstrip().startswith("3.")
     assert "[diagram 1]" in shown, shown                       # the diagram sits in the text
     assert [f["label"] for f in q["figures"]] == ["diagram 1"]
-    assert q["figures"][0]["path"] == q["diagram_paths"][0]
+    assert q["figures"][0]["original"] == q["diagram_paths"][0]        # the locked crop
+    assert q["figures"][0]["path"].startswith("clean/")                # shown: the clean drawing
     # every OCR line is still there, in the same order, with no words changed
     words = lambda s: re.sub(r"\[diagram \d+\]", " ", s).split()  # noqa: E731
     assert words(shown)[1:] == words(q["text"])[1:]

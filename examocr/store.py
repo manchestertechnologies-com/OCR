@@ -191,8 +191,51 @@ def _save_crop(pr: Project, original: np.ndarray, kind: RegionKind, page_no: int
     blur, flag = crop_quality(img)
     c = Crop(id=cid, kind=kind, page=page_no, box=box, path=rel, sha256=sha, blur_score=blur,
              quality_flag=flag, parent_id=parent, source_part=source_part)
+    if kind in FIGURE_KINDS:
+        c.clean_path = _save_clean(pr.id, rel, img)
     pr.crops.append(c)
     return c, img
+
+
+FIGURE_KINDS = (RegionKind.diagram, RegionKind.table, RegionKind.option_image)
+
+
+def _save_clean(pid: str, rel: str, img: np.ndarray) -> str | None:
+    """The drawing alone (clean.py) next to the locked crop: clean/<same name>.png."""
+    import cv2
+
+    from .clean import clean_drawing
+    out = "clean/" + rel.split("/", 1)[-1]
+    path = project_dir(pid) / out
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(path), clean_drawing(img)):
+            return None
+    except Exception:
+        return None                    # display falls back to the locked crop
+    return out
+
+
+def ensure_clean(pid: str) -> bool:
+    """Projects made before clean copies existed: make them once (on open)."""
+    from .analyze import refresh_figures
+    pr = load(pid)
+    if not any(c.kind in FIGURE_KINDS and not c.clean_path for c in pr.crops):
+        return False
+    with _lock(pid):
+        pr = load(pid)
+        changed = False
+        for c in pr.crops:
+            if c.kind in FIGURE_KINDS and not c.clean_path:
+                f = project_dir(pid) / c.path
+                if f.exists():
+                    c.clean_path = _save_clean(pid, c.path, load_png(f))
+                    changed |= c.clean_path is not None
+        if changed:
+            for q in pr.questions:
+                refresh_figures(pr, q)
+            save(pr)
+        return changed
 
 
 def attach_part(pr: Project, original: np.ndarray, q: QuestionRecord, page_no: int, box: Box,

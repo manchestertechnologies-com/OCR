@@ -98,6 +98,7 @@ class Crop(BaseModel):
     page: int
     box: Box
     path: str                 # relative to project dir, lossless PNG
+    clean_path: Optional[str] = None   # figures: the drawing alone, dark on white (not locked)
     sha256: str
     blur_score: float
     quality_flag: str = "ok"

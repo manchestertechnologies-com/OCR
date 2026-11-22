@@ -161,6 +161,11 @@ def _get(pid: str):
 
 @app.get("/api/projects/{pid}")
 def project(pid: str):
+    _get(pid)
+    try:
+        store.ensure_clean(pid)          # older projects: make the clean diagram copies once
+    except Exception:
+        pass
     pr = _get(pid)
     out = json.loads(pr.model_dump_json())
     out["progress"] = PROGRESS.get(pid, {"message": pr.status, "fraction": 1.0})
@@ -294,7 +299,7 @@ def export(pid: str):
         docx = build_docx(pr, base)
         if docx:
             z.writestr("questions.docx", docx)
-        for folder in ("crops", "edits"):
+        for folder in ("crops", "clean", "edits"):
             for f in (base / folder).glob("*.png") if (base / folder).exists() else []:
                 z.write(f, f"{folder}/{f.name}")
     buf.seek(0)
