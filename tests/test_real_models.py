@@ -60,3 +60,26 @@ def test_layout_model_finds_image_options(tmp_data, tmp_path):
     q = r["question"]
     assert q["q_no"] == 6
     assert len(q["option_images"]) == 4, q["display_text"]
+
+
+def _molscribe_ok() -> bool:
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        import importlib.util
+        if importlib.util.find_spec("molscribe") is None:
+            return False
+        return isinstance(try_to_load_from_cache("yujieq/MolScribe", "swin_base_char_aux_1m.pth"), str)
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _molscribe_ok(), reason="MolScribe not installed")
+def test_molscribe_reads_a_printed_structure():
+    """Printed drawings are what MolScribe reads reliably (hand-drawn ones often fail - the
+    app then asks for the structure to be drawn in Ketcher)."""
+    from examocr import chem
+    for smiles in ("CC/C=C/C", "OC(=O)c1ccccc1"):
+        img = chem.png_bytes_to_array(chem.render_png(chem.mol_from(smiles=smiles), 400))
+        got, molfile, conf = chem.recognise(img)
+        assert got == chem.canonical_smiles(chem.mol_from(smiles=smiles)), (smiles, got, conf)
+        assert conf > 0.5 and "M  END" in molfile

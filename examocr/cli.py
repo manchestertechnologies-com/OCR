@@ -1,6 +1,6 @@
 """Command line:
   python -m examocr.cli process paper.pdf --exam NEET [--script handwritten]
-  python -m examocr.cli download-models          (offline OCR + layout models, ~2.8 GB)
+  python -m examocr.cli download-models          (offline OCR, layout, structure models + web libraries, ~4 GB)
   python -m examocr.cli verify <project_id>
   python -m examocr.cli serve
 """
@@ -57,7 +57,14 @@ def main(argv=None):
             names += [ocr.get("trocr_model"), ocr.get("trocr_math_model")]
         for m in filter(None, names):
             print("downloading", m, "->", snapshot_download(m, allow_patterns=["*.json", "*.txt", "*.jinja", "*.safetensors"]))
-        return 0
+        chem = cfg.get("chem", {})
+        if chem.get("molscribe_repo"):                     # structure drawing -> molecule (1.1 GB)
+            from huggingface_hub import hf_hub_download
+            print("downloading", chem["molscribe_repo"], "->",
+                  hf_hub_download(chem["molscribe_repo"], chem["molscribe_file"]))
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+        from fetch_web_vendor import main as fetch_vendor  # MathJax, SmilesDrawer, 3Dmol, Ketcher
+        return fetch_vendor()
     if a.cmd == "verify":
         pr = store.load(a.project)
         print(json.dumps({"hash_errors": hash_check(pr), **roundtrip(pr)}, indent=2))

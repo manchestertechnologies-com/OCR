@@ -22,7 +22,7 @@ import numpy as np
 
 from ..schemas import Box, Word
 from .base import OCREngine, OCRResult
-from .latex import markdown_to_text
+from .latex import markdown_lines
 
 log = logging.getLogger(__name__)
 MODEL = "zai-org/GLM-OCR"
@@ -229,18 +229,25 @@ class GlmOcrEngine(OCREngine):
         """-> (plain text with the image's line breaks, confidence, looped).
         A tall crop is read in bands of ~7 lines: on a whole question the model skips a line
         now and then (measured: "C) 4 3 2 1" of a 2-column answer grid); on bands it doesn't."""
+        plain, _, conf, looped = self.read_text_both(image, char_h)
+        return plain, conf, looped
+
+    def read_text_both(self, image: np.ndarray, char_h: float | None = None) -> tuple[str, str, float, bool]:
+        """-> (plain text, the same lines with formulas as LaTeX $...$, confidence, looped)."""
         ch = char_h or char_height(image)
-        texts, confs, looped = [], [], False
+        plains, latexes, confs, looped = [], [], [], False
         for band in split_bands(image, ch, self.band_lines):
             md, c, lp = self.recognize(band, "text", ch)
-            t = markdown_to_text(md)
+            lines = markdown_lines(md)
+            t = "\n".join(p for p, _ in lines)
             if t.strip():
-                texts.append(t)
+                plains.append(t)
+                latexes.append("\n".join(x for _, x in lines))
                 confs.append((c, len(t)))
             looped |= lp
         n = sum(k for _, k in confs)
         conf = sum(c * k for c, k in confs) / n if n else 1.0
-        return "\n".join(texts), conf, looped
+        return "\n".join(plains), "\n".join(latexes), conf, looped
 
     # ------------------------------------------------------------------ OCREngine interface
     def read(self, image: np.ndarray) -> OCRResult:

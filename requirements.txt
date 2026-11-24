@@ -14,8 +14,13 @@ jiwer>=3.0
 python-docx>=1.1          # Word export of the finished questions (text + diagrams in place)
 pytest>=8.0
 psutil>=5.9               # RAM check: low-memory mode for the handwriting models
+rdkit>=2024.3             # chemistry: check structures, draw them, 3D coordinates
+latex2mathml>=3.77        # Word export: formulas LaTeX -> MathML ...
+mathml2omml>=0.0.2        # ... -> native, editable Word equations
+lxml>=5.0
 # OCR models (offline GLM-OCR + PP-DocLayoutV3) - CPU torch, installed separately:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 #   pip install "transformers>=5.2"
-#   python -m examocr.cli download-models
+#   python -m examocr.cli download-models     (also fetches MathJax, SmilesDrawer, 3Dmol, Ketcher)
 # Without them the app falls back to Tesseract (printed text only).
+# Structure recognition (MolScribe), optional - see requirements-ml.txt

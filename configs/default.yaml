@@ -43,3 +43,10 @@ layout:
 classify:
   fuzzy_threshold: 85           # rapidfuzz score for keyword hits
   classifier_path: models/qtype_clf.joblib
+
+chem:
+  # Hand-drawn structure -> molecule (SMILES), offline. Used only when the reviewer clicks
+  # "Recognise structure"; the result is a suggestion to accept or fix in Ketcher.
+  molscribe_repo: yujieq/MolScribe            # MIT licence; "" = no auto-recognition
+  molscribe_file: swin_base_char_aux_1m.pth   # 1.1 GB, downloaded once
+  image_width: 360                            # px width of the structure image drawn by RDKit

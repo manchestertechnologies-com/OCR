@@ -135,17 +135,32 @@ _MATH = re.compile(r"\$\$(.+?)\$\$|\\\[(.+?)\\\]|\$(.+?)\$|\\\((.+?)\\\)", re.S)
 _TAG = re.compile(r"</?(?:table|thead|tbody|tr|td|th|br|p|div|span|b|i|u|sup|sub)\b[^>]*>", re.I)
 
 
-def markdown_to_text(md: str) -> str:
-    """A page as the model wrote it (Markdown + LaTeX + maybe an HTML table) -> plain text
-    with the same lines. Formulas become Unicode; headings / bold markers are dropped."""
+_SLOT = re.compile(r"\x01(\d+)\x01")
+
+
+def markdown_lines(md: str) -> list[tuple[str, str]]:
+    """A page as the model wrote it (Markdown + LaTeX + maybe an HTML table) -> one
+    (plain, latex) pair per line. Both have exactly the same lines (figure markers are placed
+    by line number):
+      plain - formulas as Unicode text: K₂MnO₄, M/3, sec⁻¹ (search, options, type detection)
+      latex - formulas kept as $...$ / $$...$$ for MathJax + mhchem to render
+    Headings / bold markers are dropped; no stray backslash is left outside a formula."""
     md = md.replace("\r\n", "\n")
     md = re.sub(r"\\(?:textcircled|circled)\s*(?:\{(\w)\}|(\w))", lambda m: f"{m.group(1) or m.group(2)})", md)
     md = re.sub(r"<sup>(.*?)</sup>", lambda m: _script(m.group(1), SUP, "^"), md, flags=re.I | re.S)
     md = re.sub(r"<sub>(.*?)</sub>", lambda m: _script(m.group(1), SUB, "_"), md, flags=re.I | re.S)
     md = _html_table(md)
-    md = _MATH.sub(lambda m: _math(next(g for g in m.groups() if g is not None),
-                                   display=m.group(1) is not None or m.group(2) is not None), md)
-    out = []
+    maths: list[tuple[str, bool]] = []
+
+    def slot(m):                         # each formula -> a placeholder; display math on its own line
+        body = next(g for g in m.groups() if g is not None)
+        display = m.group(1) is not None or m.group(2) is not None
+        maths.append((body.replace("\n", " ").strip(), display))
+        token = f"\x01{len(maths) - 1}\x01"
+        return f"\n{token}\n" if display else token
+    md = _MATH.sub(slot, md)
+
+    out: list[tuple[str, str]] = []
     for ln in md.split("\n"):
         ln = re.sub(r"^\s{0,3}#{1,6}\s+", "", ln)                  # heading
         ln = re.sub(r"(\*\*|__)(.+?)\1", r"\2", ln)                 # bold
@@ -155,12 +170,45 @@ def markdown_to_text(md: str) -> str:
             continue                                                # markdown table rule
         if ln.strip().startswith("|") and ln.strip().endswith("|"):
             ln = "   ".join(c.strip() for c in ln.strip().strip("|").split("|"))
-        if re.search(r"\\[A-Za-z]{2,}|[_^]\{", ln):                 # LaTeX written outside $...$
-            ln = latex_to_text(ln)
-        out.append(no_backslash(ln).rstrip())
-    text = "\n".join(out)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip("\n")
+        if re.search(r"\\[A-Za-z]{2,}|[_^]\{", _SLOT.sub("", ln)):   # LaTeX written outside $...$
+            ln = _SLOT.sub(lambda m: _math_plain(*maths[int(m.group(1))]), ln)
+            ln = no_backslash(latex_to_text(ln)).rstrip()
+            out.append((ln, ln))                                    # no $ to render: plain both ways
+            continue
+        plain = no_backslash(_SLOT.sub(lambda m: _math_plain(*maths[int(m.group(1))]), ln))
+        latex = "".join(_math_latex(*maths[int(p)]) if i % 2 else no_backslash(p)
+                        for i, p in enumerate(_SLOT.split(ln)))
+        out.append((plain.rstrip(), latex.rstrip()))
+    # at most one blank line in a row; none at the ends (decided on the plain text, for both)
+    tidy: list[tuple[str, str]] = []
+    for pair in out:
+        if not pair[0].strip() and (not tidy or not tidy[-1][0].strip()):
+            continue
+        tidy.append(pair if pair[0].strip() else ("", ""))
+    while tidy and not tidy[-1][0].strip():
+        tidy.pop()
+    return tidy
+
+
+def markdown_to_text(md: str) -> str:
+    """Plain text with the page's lines (formulas as Unicode)."""
+    return "\n".join(p for p, _ in markdown_lines(md))
+
+
+def markdown_to_latex(md: str) -> str:
+    """The same lines with formulas kept as LaTeX ($...$) for MathJax + mhchem."""
+    return "\n".join(t for _, t in markdown_lines(md))
+
+
+def _math_plain(body: str, display: bool) -> str:
+    return latex_to_text(math_spaces(body)).replace("\n", " ")
+
+
+def _math_latex(body: str, display: bool) -> str:
+    body = body.strip()
+    if not body:
+        return ""
+    return f"$${body}$$" if display else f"${body}$"
 
 
 def math_spaces(body: str) -> str:

@@ -2,8 +2,9 @@
 else the page layout) with each "[diagram 1]" / "[option image 2]" marker replaced by that
 locked crop image, at the spot it was placed.
 
-  questions.html   open in a browser (images next to it in crops/)
-  questions.docx   Word, images embedded
+  questions.html   open in a browser (images next to it in crops/); formulas rendered by
+                   MathJax + mhchem, bundled in vendor/mathjax/ so it works offline
+  questions.docx   Word, images embedded, formulas as native editable Word equations
 """
 from __future__ import annotations
 
@@ -19,7 +20,28 @@ DPI = 300          # pages are rendered at >= 300 DPI: 300 px of crop = 1 inch o
 
 
 def final_text(q: QuestionRecord) -> str:
-    return q.text_edited if q.text_edited is not None else (q.display_text or q.text)
+    """The question as it should be printed: the reviewer's copy, else the page layout -
+    with formulas as LaTeX ($...$)."""
+    if q.text_edited is not None:
+        return q.text_edited
+    return q.display_latex or q.display_text or q.text
+
+
+def final_plain(q: QuestionRecord) -> str:
+    """The same as plain text (formulas as Unicode: K₂MnO₄, M/3) for JSON and search."""
+    from .ocr.latex import markdown_to_text
+    return markdown_to_text(final_text(q))
+
+
+# MathJax for the exported page: the same files the app uses, copied into the ZIP
+MATHJAX_FILES = ["tex-chtml-full.js"]
+MATHJAX_DIRS = ["output/chtml/fonts/woff-v2"]
+MATHJAX_CONFIG = """<script>
+window.MathJax = { tex: { inlineMath: [["$", "$"], ["\\(", "\\)"]], displayMath: [["$$", "$$"], ["\\[", "\\]"]],
+  packages: {"[+]": ["mhchem"]} }, options: { enableMenu: false },
+  chtml: { fontURL: "vendor/mathjax/output/chtml/fonts/woff-v2" } };
+</script>
+<script src="vendor/mathjax/tex-chtml-full.js" async></script>"""
 
 
 def _pieces(q: QuestionRecord):
@@ -58,7 +80,9 @@ h1 {{ font-size: 20px; }} h2 {{ font-size: 15px; margin: 0 0 6px; }} small {{ co
 section {{ border: 1px solid #ddd; border-radius: 8px; padding: 12px 14px; margin: 0 0 16px; break-inside: avoid; }}
 .q {{ font: 14px/1.6 Consolas, ui-monospace, monospace; white-space: pre; overflow-x: auto; }}
 .q img {{ vertical-align: middle; max-width: 48%; max-height: 260px; }}
-</style></head><body>
+</style>
+{MATHJAX_CONFIG}
+</head><body>
 <h1>{html.escape(pr.source_name)} · {html.escape(pr.exam)} · {len(pr.questions)} questions</h1>
 {chr(10).join(rows)}
 </body></html>"""
@@ -73,6 +97,8 @@ def build_docx(pr: Project, base: Path) -> bytes | None:
     except ImportError:
         return None
     from PIL import Image
+
+    from .mathdoc import add_math_runs
     doc = Document()
     doc.add_heading(f"{pr.source_name} · {pr.exam}", level=1)
     for q in pr.questions:
@@ -81,9 +107,8 @@ def build_docx(pr: Project, base: Path) -> bytes | None:
             p = doc.add_paragraph()
             p.paragraph_format.space_after = Pt(2)
             for kind, v in line:
-                if kind == "text":
-                    r = p.add_run(v)
-                    r.font.name, r.font.size = "Consolas", Pt(10.5)   # monospace keeps the alignment
+                if kind == "text":                  # monospace keeps the alignment; $...$ -> equations
+                    add_math_runs(p, v, font="Consolas", size_pt=10.5)
                 else:
                     f = base / v
                     if not f.exists():

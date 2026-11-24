@@ -46,6 +46,11 @@ def preload_models() -> None:
              if n in ("glm", "trocr")]
 
     def work():
+        try:                       # RDKit warm-up: the first structure save is then ~50 ms, not ~200
+            from .. import chem
+            chem.render_png(chem.mol_from(smiles="CC"), 120)
+        except Exception as e:
+            log.warning("RDKit not ready: %s", e)
         try:
             from ..layout.docmodel import get_layout_model
             get_layout_model()

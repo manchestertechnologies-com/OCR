@@ -15,6 +15,7 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -91,9 +92,9 @@ _LABEL_FIELDS = ("question_type", "multi_answer", "type_signals", "type_confiden
 
 
 def _base_text(q: QuestionRecord) -> str:
-    """What the editable copy starts from: the page layout with figure markers (older
-    records without one fall back to the plain OCR text)."""
-    return q.display_text or q.text
+    """What the editable copy starts from: the page layout with figure markers and formulas
+    as LaTeX ($...$, rendered by MathJax). Older records fall back to the plain text."""
+    return q.display_latex or q.display_text or q.text
 
 
 def _json_dict(s: str | None) -> dict | None:
@@ -216,6 +217,32 @@ def _save_clean(pid: str, rel: str, img: np.ndarray) -> str | None:
     return out
 
 
+_PAGES: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+_PAGES_LOCK = threading.Lock()
+
+
+def page_image(pid: str, page: PageInfo) -> np.ndarray:
+    """The decoded original page, kept in memory (the 3 most recent): decoding a 300-DPI page
+    takes ~70 ms and every box drawn on it needs it. Pages are locked and never change; the
+    key includes the file's size and time, so a changed file is never served from memory.
+    The array is read-only: nothing can alter the original through it."""
+    path = project_dir(pid) / page.path
+    st = path.stat()
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    with _PAGES_LOCK:
+        img = _PAGES.get(key)
+        if img is not None:
+            _PAGES.move_to_end(key)
+            return img
+    img = load_png(path)
+    img.setflags(write=False)
+    with _PAGES_LOCK:
+        _PAGES[key] = img
+        while len(_PAGES) > 3:
+            _PAGES.popitem(last=False)
+    return img
+
+
 def ensure_clean(pid: str) -> bool:
     """Projects made before clean copies existed: make them once (on open)."""
     from .analyze import refresh_figures
@@ -240,42 +267,162 @@ def ensure_clean(pid: str) -> bool:
 
 def attach_part(pr: Project, original: np.ndarray, q: QuestionRecord, page_no: int, box: Box,
                 index: int | None = None, snap: bool = False) -> QuestionPart:
-    """Analyze a box as (part of) question q: save the locked crop, extract every diagram /
-    table / image option inside it as its own locked crop, and store the verbatim text.
-    snap=True first fits a rough user box to the real content (examocr/snap.py)."""
+    """Analyze a box as (part of) question q right now: save the locked crop, extract every
+    diagram / table / image option inside it as its own locked crop, and store the text.
+    (The web app does the same in two steps - reserve_part now, complete_part in the
+    background - so drawing a box answers in milliseconds.)"""
     from .analyze import analyze_part
+    part = reserve_part(pr, original, q, page_no, box, index=index, snap=snap)
+    fill_part(pr, original, q, part, analyze_part(original, page_no, part.box, script=pr.script))
+    return part
+
+
+def reserve_part(pr: Project, original: np.ndarray, q: QuestionRecord, page_no: int, box: Box,
+                 index: int | None = None, snap: bool = False) -> QuestionPart:
+    """Save the locked crop of the box and add it to q as a part that is still being read.
+    snap=True first fits a rough user box to the real content (examocr/snap.py)."""
     user_box, notes = box, []
     if snap:
         box, notes = snap_box(original, box, include_marker=True)
-    pa = analyze_part(original, page_no, box, script=pr.script)
+    box = box.clip(original.shape[1], original.shape[0])
     k = len([c for c in pr.crops if c.parent_id == q.id and c.kind == RegionKind.question]) + 1
-    c, _ = _save_crop(pr, original, RegionKind.question, page_no, pa.box,
+    c, _ = _save_crop(pr, original, RegionKind.question, page_no, box,
                       q.id if k == 1 else f"{q.id}_part{k}", parent=q.id)
     if snap:
         c.user_box, c.snap_notes = user_box, notes
+    part = QuestionPart(page=page_no, box=box, crop_id=c.id, crop_path=c.path, status="reading",
+                        blur_score=c.blur_score, quality_flag=c.quality_flag)
+    if index is None:
+        q.parts.append(part)
+    else:
+        q.parts.insert(index, part)
+    q.original_sha256 = next(x.sha256 for x in pr.crops if x.id == q.parts[0].crop_id)
+    return part
+
+
+def fill_part(pr: Project, original: np.ndarray, q: QuestionRecord, part: QuestionPart, pa) -> None:
+    """Store the reading of a part: its text (plain + LaTeX), layout, and every figure inside
+    it as its own locked crop."""
     fig_ids: dict[int, str] = {}
     for j, g in enumerate(pa.graphics, start=1):
-        gc, gimg = _save_crop(pr, original, g.kind, page_no, g.box, f"{c.id}_{g.kind.value}{j}",
-                              parent=q.id, source_part=c.id)
+        gc, gimg = _save_crop(pr, original, g.kind, part.page, g.box, f"{part.crop_id}_{g.kind.value}{j}",
+                              parent=q.id, source_part=part.crop_id)
         gc.text = g.labels
         # edge_cut checks the drawing's own ink against the question box edge. (A plain
         # "ink on the border" test on the padded crop fires on neighbouring text.)
         gc.needs_review = g.edge_cut
         fig_ids[j] = gc.id
-    layout = re.sub(r"\{\{fig:(\d+)\}\}", lambda m: "{{crop:%s}}" % fig_ids[int(m.group(1))], pa.layout)
-    part = QuestionPart(page=page_no, box=pa.box, crop_id=c.id, crop_path=c.path, text=pa.text,
-                        layout_text=layout,
-                        ocr_confidence=pa.confidence, source_type=pa.source_type,
-                        blur_score=pa.blur, quality_flag=pa.quality_flag,
-                        edge_warnings=pa.edge_warnings)
-    if index is None:
-        q.parts.append(part)
-    else:
-        q.parts.insert(index, part)
-    if q.q_no is None and pa.q_no is not None and len(q.parts) == 1:
-        q.q_no = pa.q_no
-    q.original_sha256 = next(x.sha256 for x in pr.crops if x.id == q.parts[0].crop_id)
-    return part
+
+    def crop_refs(s: str) -> str:
+        return re.sub(r"\{\{fig:(\d+)\}\}", lambda m: "{{crop:%s}}" % fig_ids[int(m.group(1))], s)
+    part.text = pa.text
+    part.layout_text = crop_refs(pa.layout)
+    part.latex_text = pa.latex or pa.text
+    part.layout_latex = crop_refs(pa.layout_latex or pa.layout)
+    part.ocr_confidence, part.source_type = pa.confidence, pa.source_type
+    part.blur_score, part.quality_flag = pa.blur, pa.quality_flag
+    part.edge_warnings = pa.edge_warnings
+    part.status = "ready"
+    # the number printed on the paper wins over one guessed from the previous question (a box
+    # read in the background was assembled - and its number guessed - before it was read)
+    if (q.q_no is None or q.q_no_inferred) and pa.q_no is not None and q.parts \
+            and q.parts[0].crop_id == part.crop_id:
+        q.q_no, q.q_no_inferred = pa.q_no, False
+
+
+def complete_part(pid: str, qid: str, crop_id: str) -> None:
+    """Background job: read a reserved part, then store the result. The reading runs without
+    the project lock; if the part was removed or moved meanwhile, the result is dropped."""
+    import time
+
+    from .analyze import analyze_part, assemble_question
+    pr = load(pid)
+    q = next((x for x in pr.questions if x.id == qid), None)
+    part = next((p for p in q.parts if p.crop_id == crop_id), None) if q else None
+    if part is None or part.status != "reading":
+        return
+    original = page_image(pid, _page(pr, part.page))
+    t0 = time.time()
+    try:
+        pa, err = analyze_part(original, part.page, part.box, script=pr.script), None
+    except Exception as e:                   # the box stays, marked with the reason
+        pa, err = None, f"{type(e).__name__}: {e}"
+    with _lock(pid):
+        pr = load(pid)
+        q = next((x for x in pr.questions if x.id == qid), None)
+        part = next((p for p in q.parts if p.crop_id == crop_id), None) if q else None
+        if part is None or part.status != "reading":
+            return                           # deleted / re-cropped while it was being read
+        if pa is not None:
+            fill_part(pr, original, q, part, pa)
+            q.read_error = None
+        else:
+            part.status = "error"
+            q.read_error = err
+        q.read_seconds = round(time.time() - t0, 1)
+        assemble_question(pr, q)
+        _sort_questions(pr)
+        save(pr)
+
+
+def complete_crop(pid: str, cid: str, subject: str | None = None) -> None:
+    """Background job for a passage / header / section box: its text and drawings."""
+    from .analyze import analyze_part
+    from .config import settings
+    pr = load(pid)
+    c = next((x for x in pr.crops if x.id == cid), None)
+    if c is None or c.status != "reading":
+        return
+    original = page_image(pid, _page(pr, c.page))
+    try:
+        pa, err = analyze_part(original, c.page, c.box, script=pr.script), None
+    except Exception as e:
+        pa, err = None, f"{type(e).__name__}: {e}"
+    with _lock(pid):
+        pr = load(pid)
+        c = next((x for x in pr.crops if x.id == cid), None)
+        if c is None or c.status != "reading":
+            return
+        _fill_crop(pr, original, c, pa, subject, settings()["ocr"]["confidence_review"])
+        if pa is None:
+            c.status, c.text = "error", err or ""
+        save(pr)
+
+
+def _fill_crop(pr: Project, original: np.ndarray, c, pa, subject: str | None, review: float) -> None:
+    if pa is None:
+        return
+    c.text, c.ocr_confidence = pa.text, pa.confidence
+    c.latex_text = pa.latex or pa.text
+    first_line = pa.text.strip().splitlines()[0][:40] if pa.text.strip() else None
+    c.subject = subject or (first_line if c.kind == RegionKind.section else None)
+    c.needs_review = pa.confidence < review
+    for j, g in enumerate(pa.graphics, start=1):
+        _save_crop(pr, original, g.kind, c.page, g.box, f"{c.id}_{g.kind.value}{j}",
+                   parent=c.id, source_part=c.id)
+    c.status = "ready"
+
+
+def requeue_reading() -> int:
+    """Server start: boxes still being read when the server stopped are read again."""
+    from . import worker
+    n = 0
+    for f in (data_dir() / "projects").glob("*/project.json"):
+        try:
+            pr = Project.model_validate_json(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for q in pr.questions:
+            for p in q.parts:
+                if p.status == "reading":
+                    worker.submit(pr.id, f"{pr.id}:{p.crop_id}",
+                                  lambda pid=pr.id, qid=q.id, cid=p.crop_id: complete_part(pid, qid, cid))
+                    n += 1
+        for c in pr.crops:
+            if c.status == "reading":
+                worker.submit(pr.id, f"{pr.id}:{c.id}", lambda pid=pr.id, cid=c.id: complete_crop(pid, cid))
+                n += 1
+    return n
 
 
 def _set_part_superseded(pr: Project, part: QuestionPart, value: bool) -> None:
@@ -297,7 +444,7 @@ def _default_subject(pr: Project, page_no: int, box: Box) -> str | None:
 # ---------------------------------------------------------------- user actions
 def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str | None = None,
                     q_no: int | None = None, subject: str | None = None,
-                    passage_id: str | None = None, snap: bool = False) -> dict:
+                    passage_id: str | None = None, snap: bool = False, background: bool = False) -> dict:
     """A box drawn by the user. It is used exactly as drawn (snap=False): the user crops,
     the app only reads what is inside.
       question            -> new question, fully analyzed (text, images inside, type, number)
@@ -305,13 +452,17 @@ def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str 
       diagram/table/option_image -> extra image for question parent_id
       passage             -> shared passage; questions link to it with passage_id
       header/instructions/section -> labelled crop with its text
+    background=True (the web app): the locked crop is saved and returned at once (ms); the
+    text, figures and type are filled in by the background reader (examocr/worker.py).
     """
+    from . import worker
     from .analyze import analyze_part, assemble_question
     from .config import settings
+    jobs: list[tuple[str, object]] = []
     with _lock(pid):
         pr = load(pid)
         page = _page(pr, page_no)
-        original = load_png(project_dir(pid) / page.path)
+        original = page_image(pid, page)
         box = box.clip(page.width, page.height)
         if box.w < 8 or box.h < 8:
             raise ValueError("crop box too small")
@@ -326,7 +477,11 @@ def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str 
             q = QuestionRecord(id=qid, exam=pr.exam, q_no=q_no, page=page_no, box=box, crop_path="",
                                crop_id="", text="", original_sha256="",
                                subject=subject or _default_subject(pr, page_no, box), passage_id=passage_id)
-            attach_part(pr, original, q, page_no, box, snap=snap)
+            if background:
+                p = reserve_part(pr, original, q, page_no, box, snap=snap)
+                jobs.append((p.crop_id, lambda qid=q.id, cid=p.crop_id: complete_part(pid, qid, cid)))
+            else:
+                attach_part(pr, original, q, page_no, box, snap=snap)
             assemble_question(pr, q)
             pr.questions.append(q)
             _sort_questions(pr)
@@ -334,7 +489,11 @@ def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str 
 
         elif kind == "part":
             q = _question(pr, parent_id or "")
-            attach_part(pr, original, q, page_no, box, snap=snap)
+            if background:
+                p = reserve_part(pr, original, q, page_no, box, snap=snap)
+                jobs.append((p.crop_id, lambda qid=q.id, cid=p.crop_id: complete_part(pid, qid, cid)))
+            else:
+                attach_part(pr, original, q, page_no, box, snap=snap)
             q.edit_history.append(EditEntry(time=now(), field="part", description="continuation part added",
                                             after=q.parts[-1].crop_id))
             assemble_question(pr, q)
@@ -361,24 +520,26 @@ def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str 
                 box, notes = snap_box(original, box, include_marker=False)
             c, img = _save_crop(pr, original, k, page_no, box, f"{kind}_{len(pr.crops) + 1:04d}")
             c.user_box, c.snap_notes = (user_box, notes) if snap else (None, [])
-            pa = analyze_part(original, page_no, box, script=pr.script)
-            c.text, c.ocr_confidence = pa.text, pa.confidence
-            first_line = pa.text.strip().splitlines()[0][:40] if pa.text.strip() else None
-            c.subject = subject or (first_line if k == RegionKind.section else None)
-            c.needs_review = pa.confidence < settings()["ocr"]["confidence_review"]
-            for j, g in enumerate(pa.graphics, start=1):
-                _save_crop(pr, original, g.kind, page_no, g.box, f"{c.id}_{g.kind.value}{j}",
-                           parent=c.id, source_part=c.id)
+            if background:
+                c.status = "reading"
+                jobs.append((c.id, lambda cid=c.id: complete_crop(pid, cid, subject)))
+            else:
+                c.status = "reading"
+                _fill_crop(pr, original, c, analyze_part(original, page_no, box, script=pr.script),
+                           subject, settings()["ocr"]["confidence_review"])
             if k == RegionKind.passage:
                 c.passage_id = f"P{sum(1 for x in pr.crops if x.kind == RegionKind.passage)}"
             result["crop"] = c.model_dump()
         else:
             raise ValueError(f"unknown crop kind '{kind}'")
         save(pr)
-        return result
+    for key, fn in jobs:                     # after the save: the reader loads the saved project
+        worker.submit(pid, f"{pid}:{key}", fn)
+    return result
 
 
-def recrop(pid: str, qid: str, box: Box, part_index: int = 0, snap: bool = False) -> QuestionRecord:
+def recrop(pid: str, qid: str, box: Box, part_index: int = 0, snap: bool = False,
+           background: bool = False) -> QuestionRecord:
     """Move/resize a question box: cut a NEW crop from the original and re-analyze it.
     The old crop (and the images extracted from it) is kept and can be restored with undo."""
     from .analyze import assemble_question
@@ -389,20 +550,26 @@ def recrop(pid: str, qid: str, box: Box, part_index: int = 0, snap: bool = False
             raise ValueError("bad part index")
         old = q.parts[part_index]
         page = _page(pr, old.page)
-        original = load_png(project_dir(pid) / page.path)
+        original = page_image(pid, page)
         box = box.clip(page.width, page.height)
         if box.w < 8 or box.h < 8:
             raise ValueError("crop box too small")
         q.parts.pop(part_index)
         _set_part_superseded(pr, old, True)
-        attach_part(pr, original, q, old.page, box, index=part_index, snap=snap)
+        if background:
+            new = reserve_part(pr, original, q, old.page, box, index=part_index, snap=snap)
+        else:
+            new = attach_part(pr, original, q, old.page, box, index=part_index, snap=snap)
         q.superseded_crops.append(old.crop_path)
         q.edit_history.append(EditEntry(time=now(), field="recrop", description="crop box moved",
                                         before=json.dumps({"index": part_index, "part": old.model_dump()}),
                                         after=q.parts[part_index].crop_id))
         assemble_question(pr, q)
         save(pr)
-        return q
+    if background:
+        from . import worker
+        worker.submit(pid, f"{pid}:{new.crop_id}", lambda: complete_part(pid, qid, new.crop_id))
+    return q
 
 
 def remove_part(pid: str, qid: str, part_index: int) -> QuestionRecord:
@@ -465,10 +632,94 @@ def undo(pid: str, qid: str) -> QuestionRecord:
             for c in pr.crops:
                 if c.id == last.after:
                     c.superseded = True
+        elif last.field == "structure":
+            snap = _json_dict(last.before) or {}
+            c = next((x for x in pr.crops if x.id == snap.get("crop_id")), None)
+            if c is not None:
+                for k in STRUCTURE_FIELDS:
+                    setattr(c, k, snap.get(k))
         q.edited = q.text_edited is not None or q.diagram_edited_path is not None
         assemble_question(pr, q)
         save(pr)
         return q
+
+
+# ---------------------------------------------------------------- chemical structures
+STRUCTURE_FIELDS = ("smiles", "molfile", "structure_path")
+
+
+def _figure_crop(pr: Project, cid: str):
+    c = next((x for x in pr.crops if x.id == cid), None)
+    if c is None or c.kind not in FIGURE_KINDS:
+        raise KeyError(cid)
+    q = next((x for x in pr.questions if x.id == c.parent_id), None)
+    return c, q
+
+
+def set_structure(pid: str, cid: str, molfile: str | None, smiles: str | None) -> dict:
+    """A structure drawn in Ketcher (or an accepted suggestion) for figure crop cid: checked
+    with RDKit, drawn cleanly, used in place of the drawing in the copy and the exports.
+    The locked crop is not touched; undo restores the previous state."""
+    from . import chem
+    from .analyze import refresh_figures
+    from .config import settings
+    mol = chem.mol_from(molfile=molfile, smiles=smiles)          # ValueError if not a molecule
+    png = chem.render_png(mol, int(settings().get("chem", {}).get("image_width", 360)))
+    with _lock(pid):
+        pr = load(pid)
+        c, q = _figure_crop(pr, cid)
+        before = json.dumps({"crop_id": c.id, **{k: getattr(c, k) for k in STRUCTURE_FIELDS}})
+        n = sum(1 for x in (q.edit_history if q else []) if x.field == "structure") + 1
+        rel = f"structures/{c.id}_v{n}.png"                     # a new file per version: undo-safe
+        path = project_dir(pid) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(png)
+        c.smiles, c.molfile, c.structure_path = chem.canonical_smiles(mol), chem.molfile(mol), rel
+        if q is not None:
+            q.edit_history.append(EditEntry(time=now(), field="structure",
+                                            description=f"structure drawn: {c.smiles}", before=before, after=rel))
+            refresh_figures(pr, q)
+        save(pr)
+        return {"crop": c.model_dump(), "question": q.model_dump() if q else None}
+
+
+def clear_structure(pid: str, cid: str) -> dict:
+    """Back to the drawing (the structure can be restored with undo)."""
+    from .analyze import refresh_figures
+    with _lock(pid):
+        pr = load(pid)
+        c, q = _figure_crop(pr, cid)
+        if c.structure_path is None and c.smiles is None:
+            return {"crop": c.model_dump(), "question": q.model_dump() if q else None}
+        before = json.dumps({"crop_id": c.id, **{k: getattr(c, k) for k in STRUCTURE_FIELDS}})
+        for k in STRUCTURE_FIELDS:
+            setattr(c, k, None)
+        if q is not None:
+            q.edit_history.append(EditEntry(time=now(), field="structure", description="structure removed",
+                                            before=before, after=None))
+            refresh_figures(pr, q)
+        save(pr)
+        return {"crop": c.model_dump(), "question": q.model_dump() if q else None}
+
+
+def suggest_structure(pid: str, cid: str) -> dict:
+    """MolScribe reads the figure's drawing -> a SUGGESTION (never applied by itself).
+    Results that are not a real molecule (wildcard atoms, broken fragments) are refused."""
+    from . import chem
+    pr = load(pid)
+    c, _ = _figure_crop(pr, cid)
+    img = load_png(project_dir(pid) / (c.clean_path or c.path))
+    smiles, mf, conf = chem.recognise(img)
+    usable = "*" not in smiles and "." not in smiles and conf >= 0.5
+    with _lock(pid):
+        pr = load(pid)
+        c, _ = _figure_crop(pr, cid)
+        c.smiles_suggested, c.suggest_conf = (smiles, round(conf, 3)) if usable else (None, round(conf, 3))
+        save(pr)
+    if not usable:
+        raise ValueError(f"the drawing could not be read as a molecule (confidence {conf:.2f}) - "
+                         "draw it in the structure editor")
+    return {"smiles": smiles, "molfile": mf, "confidence": round(conf, 3)}
 
 
 def reset(pid: str, qid: str) -> QuestionRecord:

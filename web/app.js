@@ -123,6 +123,37 @@ async function openProject(id, keepPage = false) {
   showRoundtrip(P.roundtrip);
   renderPage(); renderList();
   if (selected) renderDetail();
+  scheduleReadPoll();
+  setTimeout(() => preloadKetcher(), 2000);
+}
+
+// ---- background reading: boxes appear at once; their text arrives when the reader is done
+let readTimer = null;
+function scheduleReadPoll() {
+  clearTimeout(readTimer);
+  const n = P?.reading_queue ?? 0;
+  const busy = n > 0 || (P?.questions ?? []).some((q) => q.status === "reading") ||
+    (P?.crops ?? []).some((c) => c.status === "reading" && !c.superseded);
+  let b = $("#read-queue");
+  if (!b) {
+    b = document.createElement("span"); b.id = "read-queue"; b.className = "pill warn";
+    $("#btn-verify").before(b);
+  }
+  b.hidden = !busy;
+  b.textContent = n > 1 ? `reading ${n} boxes in the background…` : "reading in the background…";
+  if (busy) readTimer = setTimeout(refreshReading, 2000);
+}
+async function refreshReading() {
+  if (!P) return;
+  const id = P.id, before = Object.fromEntries(P.questions.map((q) => [q.id, q.status]));
+  let fresh;
+  try { fresh = await api(`/api/projects/${id}`); } catch { scheduleReadPoll(); return; }
+  if (!P || P.id !== id) return;
+  P = fresh;
+  renderPage(); renderList();
+  const q = P.questions.find((x) => x.id === selected);
+  if (q && before[q.id] !== q.status) renderDetail();      // only when ITS reading finished: never wipe typing
+  scheduleReadPoll();
 }
 $("#page-select").onchange = (e) => { page = +e.target.value; renderPage(); };
 
@@ -159,11 +190,13 @@ function renderPage() {
     if (c.page !== page || c.superseded) continue;
     const q = qByCrop[c.id] || P.questions.find((x) => x.id === c.parent_id);
     const d = document.createElement("div");
-    d.className = "box" + (q?.needs_review && c.kind === "question" ? " review" : "") + (q && q.id === selected ? " sel" : "");
+    const reading = (c.kind === "question" && q?.status === "reading") || c.status === "reading";
+    d.className = "box" + (q?.needs_review && c.kind === "question" ? " review" : "") + (q && q.id === selected ? " sel" : "") +
+      (reading ? " reading" : "");
     d.dataset.kind = c.kind; d.style.cssText = pct(c.box);
     const label = c.kind === "question" && q ? `Q${q.q_no ?? "?"}${q.parts.length > 1 ? " part " + (q.parts.findIndex((p) => p.crop_id === c.id) + 1) : ""} · ${q.question_type}`
       : c.kind === "passage" ? `passage ${c.passage_id}` : c.kind;
-    d.innerHTML = `<span class="tag">${esc(label)}</span>`;
+    d.innerHTML = `<span class="tag">${esc(reading ? (c.kind === "question" ? "reading…" : c.kind + " · reading…") : label)}</span>`;
     if (q) d.onclick = (e) => { if (!drawMode()) { e.stopPropagation(); select(q.id); } };
     ov.appendChild(d);
     if (q && q.id === selected && c.user_box && c.snap_notes?.length) {   // the box as the user drew it
@@ -187,7 +220,7 @@ function renderList() {
   $("#q-list").innerHTML = qs.map((q) => `
     <li data-q="${esc(q.id)}" class="${q.id === selected ? "sel" : ""}">
       <b>Q${esc(q.q_no ?? "?")}</b><span>${esc(q.subject ?? "")}</span>
-      <span class="snippet">${esc((q.text_edited ?? baseText(q)).replace(/\s+/g, " ").trim().slice(0, 90))}</span>
+      <span class="snippet">${q.status === "reading" ? "<i>reading…</i>" : esc((q.text_edited ?? baseText(q)).replace(/\s+/g, " ").trim().slice(0, 90))}</span>
       ${q.needs_review ? '<span class="flag" title="needs review">⚠</span>' : ""}${q.edited ? "✎" : ""}
     </li>`).join("");
 }
@@ -228,13 +261,17 @@ function renderDetail() {
       `<img src="${file(p.crop_path)}" alt="original crop"></div>`).join("") +
     (q.diagram_paths.length ? "<h4>Diagrams</h4>" + q.diagram_paths.map(figImg).join("") : "") +
     (q.option_images.length ? "<h4>Image options</h4>" + q.option_images.map(figImg).join("") : "");
-  $("#d-ocr").textContent = q.text;
+  const ocr = $("#d-ocr");
+  ocr.innerHTML = q.status === "reading" ? "<i>Reading this box in the background…</i>" : esc(q.latex_text || q.text);
+  typeset(ocr);
   $("#d-qtype").value = q.question_type;
   $("#d-qno").value = q.q_no ?? "";
   $("#d-subject").value = q.subject ?? "";
   setEditor(q, q.text_edited ?? baseText(q));
   $("#d-diagrams").innerHTML = q.diagram_edited_path ? `<h4>Edited diagram copy</h4><img src="${file(q.diagram_edited_path)}">` : "";
   updateDiff();
+  renderPreview();
+  renderStructs(q);
   const f = { options: q.options.length ? q.options.join(" | ") : "—",
     statements: q.statements.length ? q.statements.join(" | ") : "—", passage_id: q.passage_id ?? "—",
     source_type: q.source_type, blur_score: q.blur_score.toFixed(1), original_sha256: q.original_sha256.slice(0, 16) + "…",
@@ -261,7 +298,7 @@ function wordDiff(a, b) {
 }
 // The editable copy starts from the page layout: same lines, indents and spacing, with
 // "[diagram 1]" etc. where each figure sits (older records: plain OCR text).
-const baseText = (q) => q.display_text || q.text;
+const baseText = (q) => q.display_latex || q.display_text || q.text;   // formulas as LaTeX $...$
 function updateDiff() {
   const q = P.questions.find((x) => x.id === selected); if (!q) return;
   const v = getEditor(), base = baseText(q);
@@ -327,12 +364,11 @@ ed.addEventListener("drop", (e) => {
 // One action at a time: reading a crop takes a minute, and a second box drawn meanwhile only
 // waits in a queue on the server (it looked stuck, and the same box got drawn twice).
 let working = false;
-async function act(fn) {
+async function act(fn, msg = "Saving…") {
   if (working) { flashBusy(); return; }
   working = true;
   const t0 = Date.now(), busy = $("#busy");
-  const tick = () => { busy.textContent = `Reading your crop… ${Math.round((Date.now() - t0) / 1000)} s ` +
-    "(the OCR model runs on this computer: about 30-90 s per question). Please wait."; };
+  const tick = () => { const s = Math.round((Date.now() - t0) / 1000); busy.textContent = s ? `${msg} ${s} s` : msg; };
   tick(); busy.hidden = false;
   const timer = setInterval(tick, 1000);
   try {
@@ -434,3 +470,161 @@ ov.addEventListener("pointerup", async (e) => {
 });
 
 loadHome();
+
+
+// ---- maths: MathJax + mhchem render $...$ / $$...$$ / \ce{...} (offline copy in /static/vendor)
+const figMap = (q) => Object.fromEntries((q?.figures || []).map((f) => [f.label, f.path]));
+function mathHTML(text, figs) {
+  return esc(text).replace(FIG_RE, (m, kind, n) => {
+    const p = figs[`${kind} ${n}`];
+    return p ? `<img class="fig" src="${file(p)}" alt="${m}">` : m;
+  });
+}
+async function typeset(el, tries = 0) {
+  if (!window.MathJax?.typesetPromise) {                  // still loading (deferred script)
+    if (tries < 50) setTimeout(() => typeset(el, tries + 1), 200);
+    return;
+  }
+  const t0 = performance.now();
+  try {
+    MathJax.typesetClear?.([el]);
+    await MathJax.typesetPromise([el]);
+    el.dataset.renderMs = (performance.now() - t0).toFixed(1);   // speed check (dev tools)
+  } catch (e) { console.warn("MathJax:", e); }
+}
+let previewTimer = null;
+function renderPreview() {
+  const q = P?.questions.find((x) => x.id === selected); if (!q) return;
+  const el = $("#d-preview");
+  el.innerHTML = q.status === "reading" ? "<i>The text appears here when the box has been read.</i>"
+    : mathHTML(getEditor(), figMap(q));
+  typeset(el);
+}
+ed.addEventListener("input", () => { clearTimeout(previewTimer); previewTimer = setTimeout(renderPreview, 150); });
+
+// ---- figures & chemical structures: Ketcher (draw), SmilesDrawer (show SMILES), 3Dmol (3D)
+function renderStructs(q) {
+  const el = $("#d-structs");
+  const figs = q.figures || [];
+  if (!figs.length) { el.innerHTML = ""; return; }
+  el.innerHTML = "<h4>Figures &amp; structures</h4>" + figs.map((f, i) => `
+    <div class="struct-card">
+      <img src="${file(f.path)}" alt="${esc(f.label)}">
+      <div><b>${esc(f.label)}</b>${f.smiles ? `<br><code title="SMILES">${esc(f.smiles)}</code>` : ""}<br>
+        <button data-chem="${i}">${f.smiles ? "Edit structure" : "Draw structure"}</button>
+        ${f.smiles ? `<button data-mol3d="${i}">3D</button>` : ""}
+        <a href="${file(f.original)}" target="_blank">original photo</a></div>
+    </div>`).join("");
+}
+$("#d-structs").addEventListener("click", (e) => {
+  const q = P.questions.find((x) => x.id === selected); if (!q) return;
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.chem !== undefined) openChem(q.figures[+b.dataset.chem]);
+  if (b.dataset.mol3d !== undefined) open3D(q.figures[+b.dataset.mol3d]);
+});
+
+let chemFig = null;
+const kframe = $("#chem-ketcher");
+async function ketcherReady() {
+  if (!kframe.getAttribute("src")) kframe.setAttribute("src", "/static/vendor/ketcher/index.html");
+  for (let i = 0; i < 300; i++) {                         // first open: the editor loads (~2-5 s)
+    const k = kframe.contentWindow?.ketcher;
+    if (k) return k;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("The structure editor did not load. Run: python -m examocr.cli download-models");
+}
+let sdTimer = null;
+function drawSmiles(smiles) {
+  const svg = $("#chem-sd"); svg.innerHTML = "";
+  if (!smiles || !window.SmilesDrawer) return;
+  const t0 = performance.now();
+  try {
+    new SmilesDrawer.SmiDrawer({ width: 260, height: 190 }).draw(smiles, svg, "light",
+      () => { svg.dataset.renderMs = (performance.now() - t0).toFixed(1); },
+      () => { $("#chem-msg").textContent = "This SMILES is not a valid molecule."; });
+  } catch (e) { $("#chem-msg").textContent = "This SMILES is not a valid molecule."; }
+}
+$("#chem-smiles").addEventListener("input", (e) => {
+  $("#chem-msg").textContent = "";
+  clearTimeout(sdTimer); sdTimer = setTimeout(() => drawSmiles(e.target.value.trim()), 120);
+});
+async function openChem(f) {
+  chemFig = f;
+  const crop = P.crops.find((c) => c.id === f.crop_id) || {};
+  $("#chem-title").textContent = `${f.label} - structure`;
+  $("#chem-ref").src = file(crop.clean_path || f.original);
+  const smi = f.smiles || crop.smiles_suggested || "";
+  $("#chem-smiles").value = smi;
+  $("#chem-msg").textContent = crop.smiles_suggested && !f.smiles
+    ? `Recognised earlier (confidence ${crop.suggest_conf}) - check it.` : "";
+  $("#chem-clear").hidden = !f.smiles;
+  drawSmiles(smi);
+  showChem(true);
+  try {
+    const k = await ketcherReady();
+    await k.setMolecule(crop.molfile || smi || "");
+  } catch (e) { $("#chem-msg").textContent = e.message; }
+}
+// The structure panel is always in the page: closed = moved off-screen, never hidden. A hidden
+// frame does not start Ketcher; this way it loads in the background while you work.
+function showChem(on) {
+  $("#chem-dlg").classList.toggle("open", on);
+  $("#chem-backdrop").hidden = !on;
+}
+$("#chem-close").onclick = () => showChem(false);
+$("#chem-backdrop").onclick = () => showChem(false);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#chem-dlg").classList.contains("open")) showChem(false); });
+function preloadKetcher() {                       // ~5 s, once, a moment after a paper is opened
+  if (!kframe.getAttribute("src")) kframe.setAttribute("src", "/static/vendor/ketcher/index.html");
+}
+$("#chem-use").onclick = async () => {
+  const smi = $("#chem-smiles").value.trim(); if (!smi) return;
+  try { await (await ketcherReady()).setMolecule(smi); } catch (e) { $("#chem-msg").textContent = e.message; }
+};
+$("#chem-recog").onclick = async () => {
+  const msg = $("#chem-msg");
+  msg.textContent = "Reading the drawing… (the first time this loads the model: ~40 s)";
+  try {
+    const r = await api(`/api/projects/${P.id}/crops/${chemFig.crop_id}/recognise`, { method: "POST" });
+    $("#chem-smiles").value = r.smiles; drawSmiles(r.smiles);
+    msg.textContent = `Recognised with confidence ${r.confidence}. Check it, then "Use in editor".`;
+  } catch (e) { msg.textContent = e.message; }
+};
+$("#chem-save").onclick = async () => {
+  try {
+    const k = await ketcherReady();
+    // the molfile only: RDKit on the server checks it and makes the SMILES (asking Ketcher
+    // for the SMILES too costs another ~0.4 s)
+    const molfile = await k.getMolfile();
+    if (!/^\s*[1-9]/m.test(molfile.split("\n")[3] || "")) {
+      $("#chem-msg").textContent = "The editor is empty - draw the structure first."; return;
+    }
+    await api(`/api/projects/${P.id}/crops/${chemFig.crop_id}/structure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ molfile }) });
+    showChem(false);
+    await openProject(P.id, true);
+  } catch (e) { $("#chem-msg").textContent = e.message; }
+};
+$("#chem-clear").onclick = async () => {
+  await api(`/api/projects/${P.id}/crops/${chemFig.crop_id}/structure`, { method: "DELETE" });
+  showChem(false);
+  await openProject(P.id, true);
+};
+
+let viewer3d = null;
+async function open3D(f) {
+  $("#mol3d-title").textContent = `${f.label} - 3D (${f.smiles})`;
+  $("#mol3d-dlg").showModal();
+  try {
+    const t0 = performance.now();
+    const r = await api(`/api/chem/3d?smiles=${encodeURIComponent(f.smiles)}`);
+    if (!viewer3d) viewer3d = $3Dmol.createViewer($("#mol3d"), { backgroundColor: "white" });
+    viewer3d.clear();
+    viewer3d.addModel(r.molblock, "mol");
+    viewer3d.setStyle({}, { stick: { radius: 0.14 }, sphere: { scale: 0.25 } });
+    viewer3d.zoomTo(); viewer3d.render();
+    $("#mol3d").dataset.renderMs = (performance.now() - t0).toFixed(1);
+  } catch (e) { $("#mol3d").textContent = e.message; }
+}
+$("#mol3d-close").onclick = () => $("#mol3d-dlg").close();

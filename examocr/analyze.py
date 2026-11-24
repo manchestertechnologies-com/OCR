@@ -58,6 +58,8 @@ class PartAnalysis:
     graphics: list[FoundGraphic] = field(default_factory=list)
     edge_warnings: list[str] = field(default_factory=list)
     layout: str = ""             # text laid out as on the page, {{fig:n}} = graphics[n-1]
+    latex: str = ""              # the same text with formulas as LaTeX $...$ ("" = same as text)
+    layout_latex: str = ""       # the same layout with formulas as LaTeX
 
 
 def analyze_part(original: np.ndarray, page: int, box: Box, find_graphics: bool = True,
@@ -242,14 +244,16 @@ def _analyze_vlm(engine, original: np.ndarray, page: int, box: Box, img: np.ndar
     if find_graphics:
         graphics, local_boxes = _graphics_model(original, box, img, ch, rules, add_rules=not hand,
                                                 text_boxes=sentences)
-    text, layout, conf, notes = read_crop(engine, img, box, graphics, local_boxes, ch, sentences + labels)
+    text, layout, conf, notes, latex, layout_latex = read_crop(engine, img, box, graphics, local_boxes, ch,
+                                                             sentences + labels)
     q_no = find_q_no(text)
     warnings = notes + cut_edges(img, ch)
     if q_no is not None and contains_next(text, q_no):
         warnings.append(f"box also contains question {q_no + 1} - make it smaller")
     return PartAnalysis(page=page, box=box, image=img, text=text, confidence=conf,
                         source_type="handwritten" if hand else "printed", blur=blur, quality_flag=flag,
-                        q_no=q_no, graphics=graphics, edge_warnings=warnings, layout=layout)
+                        q_no=q_no, graphics=graphics, edge_warnings=warnings, layout=layout,
+                        latex=latex, layout_latex=layout_latex)
 
 
 def _sentence_boxes(res: OCRResult, img: np.ndarray) -> tuple[list[Box], list[Box]]:
@@ -363,9 +367,10 @@ OPT_TOKEN = re.compile(r"(?:(?<=\s)|^)(\(?[A-Da-d1-4][.)])(?=\s|$)")
 
 
 def read_crop(engine, img: np.ndarray, box: Box, graphics: list[FoundGraphic], local_boxes: list[Box],
-              ch: float, protect: list[Box] = ()) -> tuple[str, str, float, list[str]]:
+              ch: float, protect: list[Box] = ()) -> tuple[str, str, float, list[str], str, str]:
     """Read the whole crop in ONE pass with the drawings blanked (OCR input only), then put a
-    {{fig:n}} marker where each drawing sits. -> (text, layout, confidence, notes).
+    {{fig:n}} marker where each drawing sits.
+    -> (text, layout, confidence, notes, latex text, latex layout) - latex: formulas as $...$.
     One pass on purpose: reading the crop in bands, the model invented the half of a line a
     band edge cut through ("B) Q = 1" on a tilted photo). Tables are not blanked - their
     text is read - and the table image is placed after it."""
@@ -379,12 +384,25 @@ def read_crop(engine, img: np.ndarray, box: Box, graphics: list[FoundGraphic], l
             ocr_in[y0:y1, x0:x1] = 255
     for b in protect:                        # ...but never the question's own sentences
         ocr_in[b.y0:b.y1, b.x0:b.x1] = img[b.y0:b.y1, b.x0:b.x1]
-    t, conf, looped = engine.read_text(ocr_in, ch) if has_ink(ocr_in) else ("", 1.0, False)
+    if not has_ink(ocr_in):
+        t, tl, conf, looped = "", "", 1.0, False
+    elif hasattr(engine, "read_text_both"):
+        t, tl, conf, looped = engine.read_text_both(ocr_in, ch)
+    else:
+        t, conf, looped = engine.read_text(ocr_in, ch)
+        tl = t
     notes = ["the reader repeated itself on this crop - check the text"] if looped else []
     lines = [ln.rstrip() for ln in t.strip("\n").splitlines()] if t.strip() else []
-    layout = place_figures(lines, ocr_in, graphics, local_boxes) if graphics else list(lines)
+    lat = [ln.rstrip() for ln in tl.strip("\n").splitlines()] if tl.strip() else []
+    if len(lat) != len(lines):
+        lat = list(lines)                         # never mis-aligned: plain is always right
+    if graphics:
+        layout, layout_l = place_figures(lines, ocr_in, graphics, local_boxes, twin=lat)
+    else:
+        layout, layout_l = list(lines), list(lat)
     text = "\n".join(lines).strip("\n")
-    return text, "\n".join(layout).strip("\n"), round(conf if text else 1.0, 4), notes
+    return (text, "\n".join(layout).strip("\n"), round(conf if text else 1.0, 4), notes,
+            "\n".join(lat).strip("\n"), "\n".join(layout_l).strip("\n"))
 
 
 def _visual_rows(boxes: list[Box]) -> list[list]:
@@ -402,12 +420,24 @@ def _visual_rows(boxes: list[Box]) -> list[list]:
 
 
 def place_figures(lines: list[str], ocr_in: np.ndarray, graphics: list[FoundGraphic],
-                  local_boxes: list[Box]) -> list[str]:
+                  local_boxes: list[Box], twin: list[str] | None = None):
     """Layout lines: the text lines with each figure's marker at its height. The model gives
     no positions, so line k is placed at the k-th visual text row of the (blanked) crop,
     scaled when the counts differ. A row of drawings, each beside its own option label with
     nothing else written ("A)  [drawing]   B)  [drawing]"), is a row of image options: each
-    marker goes right after its label."""
+    marker goes right after its label.
+    twin: the same lines with formulas as LaTeX - given, it gets exactly the same markers
+    (decided on the plain lines) and (plain layout, latex layout) is returned."""
+    if twin is not None and len(twin) != len(lines):
+        twin = None                              # never mis-align: the twin falls back to plain
+    if twin is None:
+        res = _place_figures(lines, ocr_in, graphics, local_boxes, [list(lines)])
+        return res[0]
+    return tuple(_place_figures(lines, ocr_in, graphics, local_boxes, [list(lines), list(twin)]))
+
+
+def _place_figures(lines: list[str], ocr_in: np.ndarray, graphics: list[FoundGraphic],
+                   local_boxes: list[Box], copies: list[list[str]]) -> list[list[str]]:
     from .ocr.handseg import binarize, segment
     lay = segment(binarize(ocr_in))
     trows = _visual_rows(lay.line_boxes)
@@ -419,7 +449,7 @@ def place_figures(lines: list[str], ocr_in: np.ndarray, graphics: list[FoundGrap
             est[k] = (row[0] + row[1]) / 2
         else:
             est[k] = 0.0
-    out = list(lines)
+    out = copies[0]                              # decisions are made on the plain lines
     after: dict[int, list[str]] = {}
     # Option labels standing alone on their line ("A)") had a drawing as their content.
     # They pair up, in reading order, with the LAST drawings of the crop (options come at the
@@ -430,8 +460,9 @@ def place_figures(lines: list[str], ocr_in: np.ndarray, graphics: list[FoundGrap
     if len(alone) >= 2 and order and all(graphics[i].kind != RegionKind.table for i in order):
         for k, i in zip(alone, order):
             graphics[i].kind = RegionKind.option_image
-            out[k] = f"{out[k].strip()} {FIG % (i + 1)}"
-        return out
+            for c in copies:
+                c[k] = f"{c[k].strip()} {FIG % (i + 1)}"
+        return copies
     for y0, y1, ids in _visual_rows(local_boxes):
         ids = sorted(ids, key=lambda i: local_boxes[i].x0)
         span = [k for k in filled if y0 <= est[k] <= y1]
@@ -441,18 +472,26 @@ def place_figures(lines: list[str], ocr_in: np.ndarray, graphics: list[FoundGrap
         if len(ids) >= 2 and labels and len(labels) == len(ids) and textless:
             for i in ids:
                 graphics[i].kind = RegionKind.option_image
-            it = iter(ids)
-            for k in span:
-                out[k] = OPT_TOKEN.sub(lambda m: f"{m.group(1)} {FIG % (next(it) + 1)}", out[k])
+            for c in copies:
+                it = iter(ids)
+
+                def put(m, it=it):
+                    i = next(it, None)
+                    return m.group(1) if i is None else f"{m.group(1)} {FIG % (i + 1)}"
+                for k in span:
+                    c[k] = OPT_TOKEN.sub(put, c[k])
             continue
         cy = (y0 + y1) / 2
         pos = span[-1] if span else max((k for k in filled if est[k] < cy), default=-1)
         after.setdefault(pos, []).append("   ".join(FIG % (i + 1) for i in ids))
-    res = after.get(-1, [])
-    for k, ln in enumerate(out):
-        res.append(ln)
-        res += after.get(k, [])
-    return res
+    result = []
+    for c in copies:
+        res = list(after.get(-1, []))
+        for k, ln in enumerate(c):
+            res.append(ln)
+            res += after.get(k, [])
+        result.append(res)
+    return result
 
 
 def cut_edges(img: np.ndarray, ch: float) -> list[str]:
@@ -722,19 +761,26 @@ def _build_display(q: QuestionRecord, children: list, order) -> None:
         count[kind] += 1
         label[cid] = f"{kind} {count[kind]}"
     name = lambda cid: f"[{label[cid]}]"  # noqa: E731
-    out = []
-    for t in texts:
-        for ln in t.splitlines():
-            had = CROP_REF.search(ln) is not None
-            ln = CROP_REF.sub(lambda m: name(m.group(1)) if m.group(1) in by_id else "", ln).rstrip()
-            if ln.strip() or not had:                  # drop a row that only held a removed figure
-                out.append(ln)
-    out += [name(cid) for cid in extra]
-    q.display_text = "\n".join(out).strip("\n")
-    # shown and exported: the clean drawing (no paper / shadows); the locked photo crop stays
-    # available as "original"
-    q.figures = [{"label": label[cid], "path": by_id[cid].clean_path or by_id[cid].path,
-                  "original": by_id[cid].path} for cid in ids]
+
+    def show(sources: list[str]) -> str:
+        out = []
+        for t in sources:
+            for ln in t.splitlines():
+                had = CROP_REF.search(ln) is not None
+                ln = CROP_REF.sub(lambda m: name(m.group(1)) if m.group(1) in by_id else "", ln).rstrip()
+                if ln.strip() or not had:              # drop a row that only held a removed figure
+                    out.append(ln)
+        out += [name(cid) for cid in extra]
+        return "\n".join(out).strip("\n")
+    q.display_text = show(texts)
+    # the same layout with formulas as LaTeX: what the editable copy starts from
+    q.display_latex = show([p.layout_latex or p.latex_text or p.layout_text or p.text for p in q.parts])
+    # shown and exported: a structure redrawn in Ketcher, else the clean drawing (no paper /
+    # shadows); the locked photo crop stays available as "original"
+    q.figures = [{"label": label[cid],
+                  "path": by_id[cid].structure_path or by_id[cid].clean_path or by_id[cid].path,
+                  "original": by_id[cid].path, "crop_id": cid, "smiles": by_id[cid].smiles}
+                 for cid in ids]
 
 
 def compose_layout(res: OCRResult, figures: list[Box], unreadable: float, fix=None) -> str:
@@ -889,6 +935,7 @@ def assemble_question(pr: Project, q: QuestionRecord) -> QuestionRecord:
     cfg = settings()
     parts = q.parts
     q.text = "\n".join(p.text for p in parts if p.text)
+    q.latex_text = "\n".join((p.latex_text or p.text) for p in parts if p.text)
     n = [max(1, len(p.text)) for p in parts]
     q.ocr_confidence = round(sum(p.ocr_confidence * k for p, k in zip(parts, n)) / max(1, sum(n)), 4)
     srcs = {p.source_type for p in parts}
@@ -939,7 +986,8 @@ def assemble_question(pr: Project, q: QuestionRecord) -> QuestionRecord:
         reasons.append(f"question type uncertain ({q.question_type.value})")
     if "[?]" in q.text:
         reasons.append("unreadable words marked [?]")
-    if q.q_no is None or q.q_no_inferred:
+    still_reading = any(p.status == "reading" for p in parts)
+    if (q.q_no is None or q.q_no_inferred) and not still_reading:   # never guess before it is read
         prev = [x for x in pr.questions if x.id != q.id and x.q_no is not None and not x.q_no_inferred
                 and (x.page, x.box.y0) < (q.page, q.box.y0)]
         if q.q_no is None and prev:
@@ -952,6 +1000,14 @@ def assemble_question(pr: Project, q: QuestionRecord) -> QuestionRecord:
         reasons.extend(p.edge_warnings)
     if not q.text.strip() and not children:
         reasons.append("no content found in the crop")
+    if any(p.status == "reading" for p in parts):
+        q.status = "reading"
+        reasons = ["still being read (in the background) - the text appears when it is done"]
+    elif any(p.status == "error" for p in parts):
+        q.status = "error"
+        reasons.insert(0, f"reading failed: {q.read_error or 'unknown error'} - redraw the box (M)")
+    else:
+        q.status = "ready"
     q.review_reasons = reasons
     q.needs_review = bool(reasons)
     return q

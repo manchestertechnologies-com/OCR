@@ -24,7 +24,7 @@ def save_png(img: np.ndarray, path: str | Path, lock: bool = True) -> str:
     """Write a lossless PNG and return its SHA-256. Locked files are made read-only."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ok, buf = cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 6])  # zlib = lossless
+    ok, buf = cv2.imencode(".png", img, [cv2.IMWRITE_PNG_COMPRESSION, 1])  # zlib = lossless at any level; 1 = fast
     if not ok:
         raise IOError(f"PNG encode failed for {path}")
     if path.exists():

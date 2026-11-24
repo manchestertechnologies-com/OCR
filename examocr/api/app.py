@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import mimetypes
 import tempfile
 import threading
 import zipfile
@@ -27,11 +28,13 @@ from ..verify import hash_check, roundtrip
 @asynccontextmanager
 async def lifespan(_app):
     store.mark_interrupted()
+    store.requeue_reading()              # boxes still being read when the server stopped
     from ..ocr.router import preload_models
     preload_models()
     yield
 
 
+mimetypes.add_type("application/wasm", ".wasm")     # Ketcher's chemistry engine (Windows lacks it)
 app = FastAPI(title="Exam paper OCR", lifespan=lifespan)
 
 
@@ -169,6 +172,8 @@ def project(pid: str):
     pr = _get(pid)
     out = json.loads(pr.model_dump_json())
     out["progress"] = PROGRESS.get(pid, {"message": pr.status, "fraction": 1.0})
+    from ..worker import pending
+    out["reading_queue"] = pending(pid)      # boxes waiting / being read in the background
     return out
 
 
@@ -252,7 +257,7 @@ def reset(pid: str, qid: str):
 
 @app.post("/api/projects/{pid}/questions/{qid}/recrop")
 def recrop(pid: str, qid: str, body: BoxIn, part: int = 0, snap: bool = False):
-    return _wrap(store.recrop, pid, qid, Box(**body.model_dump()), part, snap)
+    return _wrap(store.recrop, pid, qid, Box(**body.model_dump()), part, snap, True)   # read in background
 
 
 @app.delete("/api/projects/{pid}/questions/{qid}/parts/{index}")
@@ -269,7 +274,67 @@ def delete_question(pid: str, qid: str):
 @app.post("/api/projects/{pid}/crops")
 def manual_crop(pid: str, body: ManualCrop):
     return _wrap(store.add_manual_crop, pid, body.page, Box(**body.box.model_dump()), body.kind,
-                 body.parent_id, body.q_no, body.subject, body.passage_id, body.snap)
+                 body.parent_id, body.q_no, body.subject, body.passage_id, body.snap, True)   # background
+
+
+# ---------------------------------------------------------------- chemical structures
+class StructureIn(BaseModel):
+    molfile: str | None = None
+    smiles: str | None = None
+
+
+@app.post("/api/projects/{pid}/crops/{cid}/structure")
+def set_structure(pid: str, cid: str, body: StructureIn):
+    """Save a structure drawn in Ketcher (or an accepted suggestion) for a figure."""
+    if not (body.molfile or body.smiles):
+        raise HTTPException(400, "send a molfile or a SMILES")
+    try:
+        return store.set_structure(pid, cid, body.molfile, body.smiles)
+    except KeyError:
+        raise HTTPException(404, "figure not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/projects/{pid}/crops/{cid}/structure")
+def clear_structure(pid: str, cid: str):
+    try:
+        return store.clear_structure(pid, cid)
+    except KeyError:
+        raise HTTPException(404, "figure not found")
+
+
+@app.post("/api/projects/{pid}/crops/{cid}/recognise")
+def recognise_structure(pid: str, cid: str):
+    """MolScribe's reading of a structure drawing - a suggestion only (seconds, not ms)."""
+    try:
+        return store.suggest_structure(pid, cid)
+    except KeyError:
+        raise HTTPException(404, "figure not found")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+
+
+@app.get("/api/chem/3d")
+def structure_3d(smiles: str):
+    """3D coordinates (molfile) for the 3D viewer, made by RDKit."""
+    from .. import chem
+    try:
+        return {"molblock": chem.to_3d_molblock(smiles)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/chem/check")
+def check_smiles(smiles: str):
+    """Is this a valid molecule? -> canonical SMILES (for the SMILES box)."""
+    from .. import chem
+    try:
+        return {"smiles": chem.canonical_smiles(chem.mol_from(smiles=smiles))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/projects/{pid}/verify")
@@ -289,8 +354,14 @@ def export(pid: str):
     base = store.project_dir(pid)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:   # PNGs are stored, not recompressed
-        z.writestr("questions.json", json.dumps([json.loads(q.model_dump_json()) for q in pr.questions],
-                                                indent=2, ensure_ascii=False))
+        from ..export import MATHJAX_DIRS, MATHJAX_FILES, final_plain, final_text
+        rows = []
+        for q in pr.questions:
+            row = json.loads(q.model_dump_json())
+            row["final_latex"] = final_text(q)          # what to print: formulas as LaTeX
+            row["final_text"] = final_plain(q)          # the same as plain text
+            rows.append(row)
+        z.writestr("questions.json", json.dumps(rows, indent=2, ensure_ascii=False))
         z.writestr("crops.json", json.dumps([json.loads(c.model_dump_json()) for c in pr.crops],
                                             indent=2, ensure_ascii=False))
         z.writestr("roundtrip.json", json.dumps(pr.roundtrip or {}, indent=2))
@@ -299,7 +370,14 @@ def export(pid: str):
         docx = build_docx(pr, base)
         if docx:
             z.writestr("questions.docx", docx)
-        for folder in ("crops", "clean", "edits"):
+        mj = WEB / "vendor" / "mathjax"                 # so questions.html renders formulas offline
+        for rel in MATHJAX_FILES:
+            if (mj / rel).exists():
+                z.write(mj / rel, f"vendor/mathjax/{rel}")
+        for d in MATHJAX_DIRS:
+            for f in (mj / d).glob("*") if (mj / d).exists() else []:
+                z.write(f, f"vendor/mathjax/{d}/{f.name}")
+        for folder in ("crops", "clean", "edits", "structures"):
             for f in (base / folder).glob("*.png") if (base / folder).exists() else []:
                 z.write(f, f"{folder}/{f.name}")
     buf.seek(0)

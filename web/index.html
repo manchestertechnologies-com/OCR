@@ -6,6 +6,18 @@
 <title>Exam Paper OCR</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="stylesheet" href="/static/styles.css">
+<script>
+  // MathJax + mhchem (offline copy in /static/vendor): $...$ inline, $$...$$ display, \ce{...} chemistry
+  window.MathJax = {
+    tex: { inlineMath: [["$", "$"], ["\\(", "\\)"]], displayMath: [["$$", "$$"], ["\\[", "\\]"]],
+           packages: { "[+]": ["mhchem"] } },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"], ignoreHtmlClass: "editor" },
+    startup: { typeset: false },
+  };
+</script>
+<script src="/static/vendor/mathjax/tex-chtml-full.js" defer></script>
+<script src="/static/vendor/smiles-drawer.min.js" defer></script>
+<script src="/static/vendor/3Dmol-min.js" defer></script>
 </head>
 <body>
 <header class="top">
@@ -106,13 +118,17 @@
           <div>
             <h4>Original (locked)</h4>
             <div id="d-crops"></div>
-            <pre id="d-ocr" class="ocr"></pre>
+            <div id="d-ocr" class="ocr math"></div>
           </div>
           <div>
             <h4>Editable copy</h4>
             <p class="hint">Type to fix the text. Drag a diagram with the mouse to move it.</p>
             <div id="d-text" class="editor" contenteditable="true" spellcheck="false"></div>
+            <p class="hint">Formulas: <code>$\frac{M}{3}$</code>, chemistry <code>$\ce{K2MnO4}$</code>.
+              Preview (as it will be exported):</p>
+            <div id="d-preview" class="preview math"></div>
             <div id="d-diff" class="diff"></div>
+            <div id="d-structs"></div>
             <div id="d-diagrams"></div>
             <label class="upload-edit">Replace diagram copy (PNG)
               <input type="file" id="d-diagram-file" accept="image/png">
@@ -138,6 +154,37 @@
     </div>
   </div>
 </main>
+<div id="chem-backdrop" class="backdrop" hidden></div>
+<div id="chem-dlg" class="chem panel" role="dialog" aria-modal="true" aria-label="Structure editor">
+  <div class="chem-head"><b id="chem-title">Structure</b>
+    <span class="hint">Redraw the structure in the editor, then Save. The drawing from the paper is on the left.</span>
+    <button id="chem-close" class="link" title="close">✕</button></div>
+  <div class="chem-body">
+    <div class="chem-side">
+      <h4>On the paper</h4>
+      <img id="chem-ref" alt="drawing from the paper">
+      <h4>Recognised / typed molecule</h4>
+      <svg id="chem-sd" width="260" height="190"></svg>
+      <p id="chem-msg" class="signals"></p>
+      <label>SMILES <input id="chem-smiles" spellcheck="false" placeholder="e.g. C/C=C/CC"></label>
+      <div class="chem-buttons">
+        <button id="chem-recog" title="read the drawing automatically (a suggestion - check it)">Recognise drawing</button>
+        <button id="chem-use" title="put this molecule into the editor">Use in editor →</button>
+      </div>
+    </div>
+    <iframe id="chem-ketcher" title="Ketcher structure editor"></iframe>
+  </div>
+  <div class="chem-foot">
+    <button id="chem-clear" class="danger" hidden>Remove structure (use the drawing)</button>
+    <button id="chem-save" class="primary">Save structure</button>
+  </div>
+</div>
+<dialog id="mol3d-dlg" class="chem">
+  <div class="chem-head"><b id="mol3d-title">3D view</b>
+    <span class="hint">Drag to rotate, scroll to zoom.</span>
+    <button id="mol3d-close" class="link" title="close">✕</button></div>
+  <div id="mol3d" class="mol3d"></div>
+</dialog>
 <script src="/static/app.js"></script>
 </body>
 </html>

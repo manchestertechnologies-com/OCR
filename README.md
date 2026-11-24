@@ -43,8 +43,9 @@ C:\Users\DELL\.venvs\examocr\Scripts\pip install "transformers>=5.2"
 C:\Users\DELL\.venvs\examocr\Scripts\python -m examocr.cli download-models
 ```
 
-- Formulas are written as plain text: `K₂MnO₄ + MnO₂ + O₂`, `NBS/AIBN →(Heat; CCl₄)`, `M/3`,
-  `CH₃-C≡CH`. Unknown LaTeX is kept as written, never guessed.
+- Formulas are kept as LaTeX (`$\frac{M}{3}$`, `$\ce{K2MnO4}$`) and shown rendered (see below).
+  A plain-text copy (`K₂MnO₄ + MnO₂ + O₂`, `M/3`, `sec⁻¹ mol⁻¹ L`) is used for options, type
+  detection and search. No backslash ever appears in the plain text.
 - Drawings (ring structures, hand-drawn structural formulas, graphs, apparatus) are cut out as
   locked images. Reagents written over a reaction arrow stay text. A row of drawings that each
   sit next to their own option label ("A) [drawing] B) [drawing]") become **image options**.
@@ -58,12 +59,37 @@ C:\Users\DELL\.venvs\examocr\Scripts\python -m examocr.cli download-models
 - Review still matters: messy writing can be misread (a handwritten `5]` read as `3)`). Every
   low-confidence or suspicious crop is flagged with the reason.
 
+### Formulas and chemical structures (free, offline, no API keys)
+
+| Task | Tool | Where in the app |
+|---|---|---|
+| Maths rendering | **MathJax 3** (Apache-2.0) | the OCR text and the live preview under the editable copy; exported HTML |
+| Chemistry notation | **mhchem** (part of MathJax) | `$\ce{2KMnO4 ->[\Delta] K2MnO4 + MnO2 + O2}$` renders as a reaction |
+| Word export | **latex2mathml + mathml2omml** | every formula becomes a native, editable Word equation |
+| 2D structure editing | **Ketcher 3.21** (Apache-2.0) | "Draw / Edit structure" on a figure: redraw it, Save |
+| Structure checks + images | **RDKit** (BSD) | validates the molecule, draws a clean image used in the copy and exports |
+| Organic structures | **SmilesDrawer 2.4** (MIT) | draws a SMILES as you type it, and the recognised structure |
+| Reading a drawing | **MolScribe** (MIT, optional) | "Recognise drawing": a suggestion to check; printed drawings work, hand-drawn often don't |
+| 3D molecules | **3Dmol.js 3.0** (BSD) | "3D" on a figure with a structure: rotate and zoom |
+| OCR | **GLM-OCR** + Tesseract | (above). PaddleOCR is not used: GLM-OCR reads these papers better |
+
+All browser libraries are downloaded once into `web/vendor/` by `download-models` and served by
+the app, so it works offline.
+
+**Speed** (this 4-core laptop, measured in Chrome): drawing a box ~30-130 ms; rendering a
+question's formulas ~50 ms (then ~2 ms per keystroke); SmilesDrawer ~2 ms; opening the
+structure editor ~0.1-0.2 s (Ketcher is loaded in the background a few seconds after a paper
+opens); saving a structure ~0.4 s (Ketcher ~0.35 s + RDKit ~0.05 s); 3D view ~0.4 s.
+**Reading** a question (OCR) is the slow part, 30-90 s on this CPU, so it runs in the background.
+
 ## Using the web app
 
 1. **Upload.** Choose the exam. The pages load in a few seconds. Nothing is cropped by the app.
 2. **Crop.** Drag a box around a question. **Your box is used exactly as drawn**: the app never
-   moves, shrinks or extends it. If writing touches your box edge, or the box runs into the next
-   question, the app tells you, so you can redraw it (M). For each box the app:
+   moves, shrinks or extends it. The box is saved at once and shows "reading…" while the text is
+   read in the background - keep drawing the next boxes; a counter shows how many are waiting.
+   If writing touches your box edge, or the box runs into the next question, the app tells you,
+   so you can redraw it (M). For each box the app:
    - reads the text and formulas and finds the question number on the first line
    - finds every **diagram and table inside the box** and saves each as its own locked image.
      Diagram labels are kept out of the question text, and a diagram that touches your box
@@ -122,6 +148,10 @@ new ocr/
 │   ├── classify.py           question type: fuzzy keyword rules, then trained classifier
 │   ├── crop.py               lossless PNG crops cut from the original, SHA-256, read-only files
 │   ├── store.py              projects, locked originals + editable layer, history, undo, re-crop
+│   ├── worker.py             background reader: boxes are read one by one after they are drawn
+│   ├── clean.py              clean copy of a drawing (ink on white, no paper / shadows)
+│   ├── chem.py               RDKit (check, draw, 3D) + MolScribe (drawing -> SMILES)
+│   ├── mathdoc.py            formulas -> native Word equations (LaTeX -> MathML -> OMML)
 │   ├── verify.py             hash check + round-trip pixel check + lost-ink detection
 │   ├── pipeline.py           runs everything end to end
 │   ├── api/app.py            FastAPI server

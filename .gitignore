@@ -8,3 +8,6 @@ data/projects/*
 models/*.pt
 models/*.joblib
 training/runs/
+
+# browser libraries: fetched by `python -m examocr.cli download-models` (tools/fetch_web_vendor.py)
+web/vendor/

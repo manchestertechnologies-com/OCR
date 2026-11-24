@@ -99,6 +99,14 @@ class Crop(BaseModel):
     box: Box
     path: str                 # relative to project dir, lossless PNG
     clean_path: Optional[str] = None   # figures: the drawing alone, dark on white (not locked)
+    # chemical structure (a reviewer drew it in Ketcher or accepted a recognised one)
+    latex_text: str = ""               # passages / headers: text with formulas as LaTeX
+    status: str = "ready"              # passages / headers: reading | ready | error
+    smiles: Optional[str] = None
+    molfile: Optional[str] = None
+    structure_path: Optional[str] = None   # RDKit drawing of that molecule (display + export)
+    smiles_suggested: Optional[str] = None # MolScribe's reading of the drawing - a suggestion only
+    suggest_conf: Optional[float] = None
     sha256: str
     blur_score: float
     quality_flag: str = "ok"
@@ -124,6 +132,10 @@ class QuestionPart(BaseModel):
     # the same words laid out as on the page (indents, spacing) with {{crop:<id>}} where each
     # diagram / table / image option sits
     layout_text: str = ""
+    # the same with formulas kept as LaTeX ($...$) for MathJax + mhchem; "" = same as above
+    latex_text: str = ""
+    layout_latex: str = ""
+    status: str = "ready"              # reading (background OCR still running) | ready | error
     ocr_confidence: float = 0.0
     source_type: str = "printed"
     blur_score: float = 0.0
@@ -146,8 +158,15 @@ class QuestionRecord(BaseModel):
     # the question as it looks on the page: same lines, indents and spacing, with
     # "[diagram 1]" / "[table 1]" / "[option image 2]" where each figure sits
     display_text: str = ""
+    # the same with formulas kept as LaTeX ($...$): the source the editable copy starts from
+    latex_text: str = ""
+    display_latex: str = ""
     figures: list[dict] = Field(default_factory=list)   # {"label": "diagram 1", "path": crop png}
-    text_edited: Optional[str] = None
+    text_edited: Optional[str] = None          # the reviewer's copy (LaTeX source, [diagram n])
+    # reading happens in the background: "reading" until the OCR result is in
+    status: str = "ready"                      # reading | ready | error
+    read_error: Optional[str] = None
+    read_seconds: Optional[float] = None
     options: list[str] = Field(default_factory=list)
     statements: list[str] = Field(default_factory=list)
     diagram_path: Optional[str] = None         # locked original diagram crop

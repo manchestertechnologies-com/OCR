@@ -99,3 +99,39 @@ fieldset.mode { border: 0; padding: 0; margin: 8px 0; display: flex; gap: 18px; 
 .userbox { position: absolute; border: 1.5px dashed #94a3b8; pointer-events: none; }
 .busy.flash { animation: busy-flash 0.9s ease-out; }
 @keyframes busy-flash { 0%, 40% { background: #dc2626; } 100% { background: var(--accent); } }
+
+/* background reading */
+.box.reading { border-style: dashed; animation: reading 1.2s ease-in-out infinite; }
+@keyframes reading { 50% { background: color-mix(in srgb, var(--q) 22%, transparent); } }
+#read-queue { margin-right: 6px; }
+
+/* rendered maths (MathJax + mhchem) */
+.math { white-space: pre-wrap; line-height: 1.7; }
+.ocr.math { font: 13px/1.7 Consolas, ui-monospace, monospace; background: var(--bg); padding: 8px; border-radius: 6px; overflow-x: auto; }
+.preview { border: 1px dashed var(--line); border-radius: 6px; padding: 8px 10px; min-height: 2em; background: #fff; overflow-x: auto; }
+.preview img.fig, .ocr img.fig { vertical-align: middle; max-height: 140px; max-width: 45%; }
+
+/* figures & chemical structures */
+.struct-card { display: flex; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 6px; padding: 6px; margin: 6px 0; background: #fff; }
+.struct-card img { max-width: 140px; max-height: 100px; object-fit: contain; background: #fff; }
+.struct-card code { font-size: 12px; word-break: break-all; }
+dialog.chem { width: min(1100px, 96vw); max-height: 94vh; padding: 0; border: 1px solid var(--line); border-radius: 10px; }
+dialog.chem::backdrop { background: rgb(0 0 0 / 0.35); }
+.chem-head, .chem-foot { display: flex; gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.chem-foot { border-top: 1px solid var(--line); border-bottom: 0; justify-content: flex-end; }
+.chem-head .hint { flex: 1; margin: 0; }
+.chem-body { display: grid; grid-template-columns: 280px 1fr; min-height: 560px; }
+.chem-side { padding: 10px; border-right: 1px solid var(--line); overflow-y: auto; }
+.chem-side img { max-width: 100%; border: 1px solid var(--line); background: #fff; }
+.chem-side svg { border: 1px solid var(--line); background: #fff; }
+.chem-side input { width: 100%; font-family: Consolas, ui-monospace, monospace; }
+.chem-buttons { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+#chem-ketcher { width: 100%; height: 100%; min-height: 560px; border: 0; }
+.mol3d { position: relative; width: 100%; height: 520px; }
+@media (max-width: 700px) { .chem-body { grid-template-columns: 1fr; } .chem-side { border-right: 0; } }
+/* structure panel: closed = moved off-screen (still rendered, so Ketcher loads in the background) */
+.backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.35); z-index: 40; }
+.chem.panel { position: fixed; top: 3vh; left: 50%; width: min(1100px, 96vw); max-height: 94vh; overflow: auto;
+  background: #fff; border: 1px solid var(--line); border-radius: 10px; z-index: 50;
+  transform: translateX(-50%); box-shadow: 0 10px 40px rgb(0 0 0 / 0.25); }
+.chem.panel:not(.open) { transform: translateX(-300vw); pointer-events: none; }
