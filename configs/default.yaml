@@ -11,11 +11,11 @@ quality:
   contrast_min: 25.0       # std-dev of grey levels
 
 ocr:
-  # glm = GLM-OCR, an offline 0.9B document-OCR model: printed text, handwriting, formulas and
-  # tables. Accurate, ~30-90 s per question on a laptop CPU. Needs torch, torchvision and
-  # transformers (see README); without them the app falls back to Tesseract.
-  printed_engine: glm           # glm | tesseract (fast, printed only, weak on formulas) | paddle
-  handwritten_engine: glm       # glm | trocr (older line-by-line model) | tesseract
+  # Every box is read by Mathpix (see mathpix: below) - no OCR model runs on this computer.
+  # The engine settings below are NOT used by the app; the tests read with Tesseract as an
+  # offline stand-in for Mathpix. (glm = GLM-OCR, trocr = TrOCR: models no longer downloaded.)
+  printed_engine: tesseract
+  handwritten_engine: tesseract
   glm_model: zai-org/GLM-OCR    # downloaded once (~2.6 GB): python -m examocr.cli download-models
   glm_dtype: float32            # float32 is fastest on CPUs without bfloat16 (most laptops)
   glm_letter_px: 16             # crops are scaled so letters are ~this tall (never enlarged)
@@ -31,9 +31,9 @@ ocr:
 
 layout:
   engine: heuristic             # heuristic | yolo  (auto-crop only)
-  # Figures inside the user's box: a trained layout model (offline, ~130 MB, ~5 s per crop)
-  # finds drawings, hand-drawn structures and tables; "" = ink rules only
-  figure_model: PaddlePaddle/PP-DocLayoutV3_safetensors
+  # Figures inside the user's box are found by Mathpix. The offline layout model
+  # (PaddlePaddle/PP-DocLayoutV3_safetensors) is no longer used: ""
+  figure_model: ""
   yolo_weights: models/layout_yolov8.pt
   yolo_conf: 0.35
   diagram_min_area_frac: 0.004  # non-text blobs larger than this fraction of page -> diagram
@@ -45,8 +45,18 @@ classify:
   classifier_path: models/qtype_clf.joblib
 
 chem:
-  # Hand-drawn structure -> molecule (SMILES), offline. Used only when the reviewer clicks
-  # "Recognise structure"; the result is a suggestion to accept or fix in Ketcher.
-  molscribe_repo: yujieq/MolScribe            # MIT licence; "" = no auto-recognition
+  # "Recognise structure" sends the drawing to Mathpix (SMILES); the result is a suggestion to
+  # accept or fix in Ketcher. The offline MolScribe model (yujieq/MolScribe) is no longer used.
+  molscribe_repo: ""
   molscribe_file: swin_base_char_aux_1m.pth   # 1.1 GB, downloaded once
   image_width: 360                            # px width of the structure image drawn by RDKit
+
+mathpix:
+  # Reads every box: Mathpix online OCR, ~1-3 s per question (console.mathpix.com).
+  # Key: setx MATHPIX_APP_ID "..." and setx MATHPIX_APP_KEY "..."  (or configs/secrets.yaml,
+  # which is git-ignored). Without a key (or past the limit) boxes are marked "not read".
+  monthly_limit_usd: 20         # stop sending to Mathpix this month after this much; 0 = no limit
+  price_per_image_usd: 0.002    # Mathpix v3/text price (first 1M images); for the usage counter
+  inr_per_usd: 85               # only for showing the cost in rupees
+  timeout_s: 15                 # give up on Mathpix after this long -> box marked "not read"
+  include_smiles: true          # chemical structure drawings -> SMILES suggestion for Ketcher

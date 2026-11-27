@@ -31,6 +31,7 @@ async function loadHome() {
   $("#home").hidden = false; $("#review").hidden = true;
   const exams = await api("/api/exams");
   $("#exam").innerHTML = exams.map((e) => `<option>${esc(e)}</option>`).join("");
+  showMathpixStatus();
   const rows = await api("/api/projects");
   $("#projects tbody").innerHTML = rows.map((p) => `
     <tr><td>${esc(p.source_name)}</td><td>${esc(p.exam)}</td>
@@ -38,6 +39,21 @@ async function loadHome() {
     <td>${p.questions}</td><td>${p.needs_review}</td>
     <td><button class="link" data-open="${esc(p.id)}">Open</button></td></tr>`).join("")
     || `<tr><td colspan="6" class="hint">No papers yet.</td></tr>`;
+}
+let MX = null;                                    // Mathpix status: key set? usage this month
+async function showMathpixStatus() {
+  try { MX = await api("/api/mathpix"); } catch { return; }
+  const el = $("#mathpix-status");
+  if (!el) return;
+  $("#rc-price").textContent = `₹${MX.price_inr}`;
+  const rs = (v) => "₹" + Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  const used = `This month: ${MX.images} question${MX.images === 1 ? "" : "s"} · ${rs(MX.inr)}` + (MX.limit_usd ? ` of ${rs(MX.limit_inr)} limit` : "");
+  el.innerHTML = MX.configured
+    ? `⚡ Mathpix key is set. ${esc(used)}.` + (MX.limit_reached
+      ? " <b>This month's limit is reached: boxes can't be read until it is raised (mathpix: monthly_limit_usd in configs/default.yaml).</b>" : "")
+    : "⚡ <b>Mathpix key not set: boxes can't be read until it is.</b> In PowerShell: " +
+      "<code>setx MATHPIX_APP_ID \"…\"</code> and <code>setx MATHPIX_APP_KEY \"…\"</code>";
+  el.innerHTML += MX.word_upload ? "" : " · Word files need <a href=\"https://www.libreoffice.org\" target=\"_blank\">LibreOffice</a> on this computer.";
 }
 $("#projects").addEventListener("click", (e) => { const id = e.target.dataset.open; if (id) openProject(id); });
 $("#nav-home").onclick = () => { clearTimeout(pollTimer); setUploading(false); loadHome(); };
@@ -50,7 +66,7 @@ $("#file").addEventListener("change", showFile);
 function showFile() {
   const f = $("#file").files[0];
   drop.classList.remove("missing");
-  $("#drop-text").textContent = f ? `${f.name} (${(f.size / 1e6).toFixed(1)} MB)` : "Drop a PDF, scan or photo here, or click to choose";
+  $("#drop-text").textContent = f ? `${f.name} (${(f.size / 1e6).toFixed(1)} MB)` : "Drop a PDF, Word file, scan or photo here, or click to choose";
 }
 
 $("#upload-form").onsubmit = async (e) => {
@@ -59,12 +75,11 @@ $("#upload-form").onsubmit = async (e) => {
   if (!f) {
     // The real <input type=file> is hidden, so the browser can't show its own "required" bubble.
     drop.classList.add("missing");
-    $("#drop-text").textContent = "Choose a file first: click here or drop a PDF, scan or photo.";
+    $("#drop-text").textContent = "Choose a file first: click here or drop a PDF, Word file, scan or photo.";
     return;
   }
   const fd = new FormData(); fd.append("file", f); fd.append("exam", $("#exam").value);
   fd.append("mode", "manual");             // the user crops; the app never auto-crops
-  fd.append("script", $("#script").value);
   $("#progress").hidden = false; $("#progress-msg").textContent = "Uploading…";
   $("#bar-fill").style.width = "0%";
   setUploading(true);                     // a second click would create a duplicate paper
@@ -99,6 +114,7 @@ async function openProject(id, keepPage = false) {
   P = await api(`/api/projects/${id}`);
   $("#home").hidden = true; $("#review").hidden = false;
   $("#r-title").textContent = `${P.source_name} · ${P.exam}`;
+  showUsagePill();
   const st = $("#r-status"); st.textContent = P.status;
   st.className = "pill " + (P.status === "ready" ? "ok" : P.status === "error" ? "bad" : "warn");
   st.title = P.error || "";               // hover the red pill to see why a paper failed
@@ -127,8 +143,20 @@ async function openProject(id, keepPage = false) {
   setTimeout(() => preloadKetcher(), 2000);
 }
 
+async function showUsagePill() {
+  try { MX = await api("/api/mathpix"); } catch { return; }
+  let u = $("#mx-usage");
+  if (!u) { u = document.createElement("span"); u.id = "mx-usage"; u.className = "pill"; $("#btn-verify").before(u); }
+  u.className = "pill " + (MX.configured && !MX.limit_reached ? "fast" : "warn");
+  u.textContent = !MX.configured ? "⚡ Mathpix key not set - boxes can't be read"
+    : MX.limit_reached ? "⚡ Mathpix limit reached - boxes can't be read"
+    : `⚡ Mathpix: ${MX.images} this month · ₹${Number(MX.inr).toLocaleString("en-IN")}` +
+      (MX.limit_usd ? ` / ₹${Number(MX.limit_inr).toLocaleString("en-IN")}` : "");
+}
+
 // ---- background reading: boxes appear at once; their text arrives when the reader is done
 let readTimer = null;
+const readingSince = {};                          // crop id -> when this page first saw it reading
 function scheduleReadPoll() {
   clearTimeout(readTimer);
   const n = P?.reading_queue ?? 0;
@@ -141,7 +169,7 @@ function scheduleReadPoll() {
   }
   b.hidden = !busy;
   b.textContent = n > 1 ? `reading ${n} boxes in the background…` : "reading in the background…";
-  if (busy) readTimer = setTimeout(refreshReading, 2000);
+  if (busy) readTimer = setTimeout(refreshReading, 300);   // Mathpix: the text arrives in ~1-3 s
 }
 async function refreshReading() {
   if (!P) return;
@@ -153,6 +181,7 @@ async function refreshReading() {
   renderPage(); renderList();
   const q = P.questions.find((x) => x.id === selected);
   if (q && before[q.id] !== q.status) renderDetail();      // only when ITS reading finished: never wipe typing
+  if (Object.values(before).includes("reading")) showUsagePill();
   scheduleReadPoll();
 }
 $("#page-select").onchange = (e) => { page = +e.target.value; renderPage(); };
@@ -191,12 +220,17 @@ function renderPage() {
     const q = qByCrop[c.id] || P.questions.find((x) => x.id === c.parent_id);
     const d = document.createElement("div");
     const reading = (c.kind === "question" && q?.status === "reading") || c.status === "reading";
+    const failed = (c.kind === "question" && q?.status === "error") || c.status === "error";   // Mathpix could not read it
     d.className = "box" + (q?.needs_review && c.kind === "question" ? " review" : "") + (q && q.id === selected ? " sel" : "") +
-      (reading ? " reading" : "");
+      (reading ? " reading" : "") + (failed ? " failed" : "");
     d.dataset.kind = c.kind; d.style.cssText = pct(c.box);
-    const label = c.kind === "question" && q ? `Q${q.q_no ?? "?"}${q.parts.length > 1 ? " part " + (q.parts.findIndex((p) => p.crop_id === c.id) + 1) : ""} · ${q.question_type}`
+    const label = failed ? (c.kind === "question" && q ? `Q${q.q_no ?? "?"} · not read` : `${c.kind} · not read`)
+      : c.kind === "question" && q ? `Q${q.q_no ?? "?"}${q.parts.length > 1 ? " part " + (q.parts.findIndex((p) => p.crop_id === c.id) + 1) : ""} · ${q.question_type}`
       : c.kind === "passage" ? `passage ${c.passage_id}` : c.kind;
-    d.innerHTML = `<span class="tag">${esc(reading ? (c.kind === "question" ? "reading…" : c.kind + " · reading…") : label)}</span>`;
+    if (failed) d.title = (c.kind === "question" ? q?.read_error : c.text) || "not read";
+    if (reading && !readingSince[c.id]) readingSince[c.id] = Date.now();
+    const secs = reading ? ((Date.now() - readingSince[c.id]) / 1000).toFixed(1) : "";
+    d.innerHTML = `<span class="tag">${esc(reading ? (c.kind === "question" ? `reading… ${secs} s` : `${c.kind} · reading… ${secs} s`) : label)}</span>`;
     if (q) d.onclick = (e) => { if (!drawMode()) { e.stopPropagation(); select(q.id); } };
     ov.appendChild(d);
     if (q && q.id === selected && c.user_box && c.snap_notes?.length) {   // the box as the user drew it
@@ -220,7 +254,8 @@ function renderList() {
   $("#q-list").innerHTML = qs.map((q) => `
     <li data-q="${esc(q.id)}" class="${q.id === selected ? "sel" : ""}">
       <b>Q${esc(q.q_no ?? "?")}</b><span>${esc(q.subject ?? "")}</span>
-      <span class="snippet">${q.status === "reading" ? "<i>reading…</i>" : esc((q.text_edited ?? baseText(q)).replace(/\s+/g, " ").trim().slice(0, 90))}</span>
+      <span class="snippet">${q.status === "reading" ? "<i>reading…</i>" : q.status === "error" ? '<i class="read-error">not read - open it to read again</i>'
+        : esc((q.text_edited ?? baseText(q)).replace(/\s+/g, " ").trim().slice(0, 90))}</span>
       ${q.needs_review ? '<span class="flag" title="needs review">⚠</span>' : ""}${q.edited ? "✎" : ""}
     </li>`).join("");
 }
@@ -251,7 +286,8 @@ function renderDetail() {
   const c = $("#d-conf");
   c.className = "pill " + (q.needs_review ? "warn" : "ok");
   c.textContent = `type ${(q.type_confidence * 100).toFixed(0)}% · OCR ${(q.ocr_confidence * 100).toFixed(0)}% · ${q.quality_flag}`;
-  $("#d-signals").textContent = q.type_signals.length ? "Why: " + q.type_signals.join(" · ") : "";
+  const by = q.read_by ? `Read by ${q.read_by}${q.read_seconds != null ? ` in ${q.read_seconds} s` : ""}. ` : "";
+  $("#d-signals").textContent = by + (q.type_signals.length ? "Why: " + q.type_signals.join(" · ") : "");
   const snapNotes = q.parts.flatMap((p) => P.crops.find((c) => c.id === p.crop_id)?.snap_notes ?? []);
   $("#d-snap").textContent = snapNotes.length ? "Box snapped (older crop): " + [...new Set(snapNotes)].join(" · ") : "";
   $("#d-passage").value = q.passage_id ?? "";
@@ -262,8 +298,14 @@ function renderDetail() {
     (q.diagram_paths.length ? "<h4>Diagrams</h4>" + q.diagram_paths.map(figImg).join("") : "") +
     (q.option_images.length ? "<h4>Image options</h4>" + q.option_images.map(figImg).join("") : "");
   const ocr = $("#d-ocr");
-  ocr.innerHTML = q.status === "reading" ? "<i>Reading this box in the background…</i>" : esc(q.latex_text || q.text);
-  typeset(ocr);
+  if (q.status === "error") {               // Mathpix could not read it (no internet, key, limit ...)
+    ocr.innerHTML = `<p class="read-error">Mathpix could not read this box: ${esc(q.read_error || "unknown error")}</p>` +
+      `<button type="button" id="b-reread">Read again</button>`;
+    $("#b-reread").onclick = () => readAgain(q);
+  } else {
+    ocr.innerHTML = q.status === "reading" ? "<i>Reading this box in the background…</i>" : esc(q.latex_text || q.text);
+    typeset(ocr);
+  }
   $("#d-qtype").value = q.question_type;
   $("#d-qno").value = q.q_no ?? "";
   $("#d-subject").value = q.subject ?? "";
@@ -383,6 +425,15 @@ function flashBusy() {
   b.classList.remove("flash"); void b.offsetWidth; b.classList.add("flash");
 }
 const qurl = (suffix) => `/api/projects/${P.id}/questions/${selected}/${suffix}`;
+// Read again = the same box drawn again: a new locked crop, read by Mathpix in the background
+// (the old crop is kept and can be restored with undo). Only the parts that were not read.
+function readAgain(q) {
+  const parts = q.parts.map((p, i) => [p, i]).filter(([p]) => p.status === "error");
+  return act(async () => {
+    for (const [p, i] of parts)
+      await api(qurl("recrop") + `?part=${i}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(p.box) });
+  }, "Reading again…");
+}
 $("#b-save").onclick = () => act(() => api(qurl("text"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: getEditor() }) }));
 $("#b-labels").onclick = () => act(() => api(qurl("fields"), { method: "POST", headers: { "content-type": "application/json" },
   body: JSON.stringify({ question_type: $("#d-qtype").value, q_no: /^\d+$/.test($("#d-qno").value) ? +$("#d-qno").value : null,
@@ -557,7 +608,7 @@ async function openChem(f) {
   const smi = f.smiles || crop.smiles_suggested || "";
   $("#chem-smiles").value = smi;
   $("#chem-msg").textContent = crop.smiles_suggested && !f.smiles
-    ? `Recognised earlier (confidence ${crop.suggest_conf}) - check it.` : "";
+    ? `Suggested by Mathpix - check it, then "Use in editor".` : "";
   $("#chem-clear").hidden = !f.smiles;
   drawSmiles(smi);
   showChem(true);
@@ -584,11 +635,11 @@ $("#chem-use").onclick = async () => {
 };
 $("#chem-recog").onclick = async () => {
   const msg = $("#chem-msg");
-  msg.textContent = "Reading the drawing… (the first time this loads the model: ~40 s)";
+  msg.textContent = "Mathpix is reading the drawing…";
   try {
     const r = await api(`/api/projects/${P.id}/crops/${chemFig.crop_id}/recognise`, { method: "POST" });
     $("#chem-smiles").value = r.smiles; drawSmiles(r.smiles);
-    msg.textContent = `Recognised with confidence ${r.confidence}. Check it, then "Use in editor".`;
+    msg.textContent = `Read by Mathpix. Check it, then "Use in editor".`;
   } catch (e) { msg.textContent = e.message; }
 };
 $("#chem-save").onclick = async () => {

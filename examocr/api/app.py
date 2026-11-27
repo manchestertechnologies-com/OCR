@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from .. import pipeline, store
 from ..config import ROOT, available_exams
 from ..export import build_docx, build_html
-from ..ingest import IMAGE_EXT
+from ..ingest import IMAGE_EXT, WORD_EXT
 from ..schemas import Box
 from ..verify import hash_check, roundtrip
 
@@ -108,6 +108,14 @@ def version():
     return {"stale": _code_fingerprint() != STARTED_WITH}
 
 
+@app.get("/api/mathpix")
+def mathpix_status():
+    """Fast reading: is a Mathpix key set, and this month's images / cost / limit (no key shown)."""
+    from ..ingest import soffice
+    from ..usage import status
+    return {**status(), "word_upload": soffice() is not None}
+
+
 @app.get("/api/exams")
 def exams():
     return available_exams()
@@ -123,12 +131,12 @@ def exam_info(exam: str):
 
 
 @app.post("/api/projects")
-async def upload(file: UploadFile = File(...), exam: str = Form(...), mode: str = Form("manual"),
-                 script: str = Form("auto")):
+async def upload(file: UploadFile = File(...), exam: str = Form(...), mode: str = Form("manual")):
+    """Every box of the paper is read by Mathpix."""
     name = Path(file.filename or "upload").name
     ext = Path(name).suffix.lower()
-    if ext != ".pdf" and ext not in IMAGE_EXT:
-        raise HTTPException(400, f"Unsupported file type {ext}. Upload a PDF or image.")
+    if ext != ".pdf" and ext not in IMAGE_EXT and ext not in WORD_EXT:
+        raise HTTPException(400, f"Unsupported file type {ext}. Upload a PDF, Word file or image.")
     if exam.upper() not in available_exams():
         raise HTTPException(400, f"Unknown exam {exam}")
     data = await file.read()
@@ -138,7 +146,7 @@ async def upload(file: UploadFile = File(...), exam: str = Form(...), mode: str 
         tmp = Path(td) / name
         tmp.write_bytes(data)
         try:
-            pr = pipeline.create_project(tmp, exam, mode, script)
+            pr = pipeline.create_project(tmp, exam, mode)
         except ValueError as e:          # e.g. an unknown mode: a bad request, not a server crash
             raise HTTPException(400, str(e)) from None
     PROGRESS[pr.id] = {"message": "queued", "fraction": 0.0}
@@ -306,7 +314,7 @@ def clear_structure(pid: str, cid: str):
 
 @app.post("/api/projects/{pid}/crops/{cid}/recognise")
 def recognise_structure(pid: str, cid: str):
-    """MolScribe's reading of a structure drawing - a suggestion only (seconds, not ms)."""
+    """Mathpix's reading of a structure drawing - a suggestion only (~1-3 s)."""
     try:
         return store.suggest_structure(pid, cid)
     except KeyError:

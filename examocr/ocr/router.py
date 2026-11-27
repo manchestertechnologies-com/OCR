@@ -39,31 +39,15 @@ def _make(name: str) -> OCREngine:
 
 
 def preload_models() -> None:
-    """Load the big offline OCR model(s) in the background at server start, so the first
-    crop doesn't also wait for them (GLM-OCR: ~10 s, TrOCR: ~30 s)."""
-    cfg = settings()["ocr"]
-    names = [n for n in dict.fromkeys((cfg.get("handwritten_engine"), cfg.get("printed_engine")))
-             if n in ("glm", "trocr")]
-
+    """Server start: warm up RDKit in the background (the first structure save is then ~50 ms,
+    not ~200). No OCR or layout model is loaded - every box is read by Mathpix."""
     def work():
-        try:                       # RDKit warm-up: the first structure save is then ~50 ms, not ~200
+        try:
             from .. import chem
             chem.render_png(chem.mol_from(smiles="CC"), 120)
         except Exception as e:
             log.warning("RDKit not ready: %s", e)
-        try:
-            from ..layout.docmodel import get_layout_model
-            get_layout_model()
-        except Exception as e:
-            log.warning("layout model not loaded: %s", e)
-        for n in names:
-            try:
-                e = get_engine(n)
-                log.info("OCR model ready: %s", e.name)
-            except Exception as e:      # never take the server down for an optional engine
-                log.warning("OCR model %s not loaded: %s", n, e)
-    if names or settings()["layout"].get("figure_model"):
-        threading.Thread(target=work, daemon=True, name="preload-ocr").start()
+    threading.Thread(target=work, daemon=True, name="preload-rdkit").start()
 
 
 preload_handwriting = preload_models      # old name

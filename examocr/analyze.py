@@ -1,6 +1,10 @@
 """Analyze a crop the USER drew (also used by auto mode).
 
-For one box on the original page:
+Every box is read by Mathpix (online, ~1-3 s): text, formulas, the drawings in it and
+chemical structures - see _analyze_mathpix. No OCR model runs on this computer.
+
+_analyze_local (below) is the old on-this-computer reader. The app does not use it; the tests
+use it, with Tesseract, as an offline stand-in for Mathpix (tests/conftest.py). Its steps:
   1. OCR the original pixels once (pass 1) -> words, lines, text height
   2. Find diagrams / tables INSIDE the box (on a binarized working copy of the crop)
   3. If diagrams were found, OCR again with the diagram areas blanked (OCR input only)
@@ -42,6 +46,7 @@ class FoundGraphic:
     box: Box                     # original-page coordinates (with margin)
     labels: str = ""             # text read inside the drawing (A, B, 30°, ?)
     edge_cut: bool = False       # drawing reaches the edge of the user's box -> may be cut off
+    smiles: str | None = None    # a chemical structure's molecule as read by Mathpix (suggestion)
 
 
 @dataclass
@@ -60,13 +65,174 @@ class PartAnalysis:
     layout: str = ""             # text laid out as on the page, {{fig:n}} = graphics[n-1]
     latex: str = ""              # the same text with formulas as LaTeX $...$ ("" = same as text)
     layout_latex: str = ""       # the same layout with formulas as LaTeX
+    read_by: str = "this computer"   # "Mathpix" | "this computer" (tests' offline stand-in)
 
 
-def analyze_part(original: np.ndarray, page: int, box: Box, find_graphics: bool = True,
-                 script: str = "auto") -> PartAnalysis:
-    """script: auto | printed | handwritten - what the paper is written in (set at upload).
-    The box is used exactly as the user drew it: nothing is moved or extended, the app only
-    reads what is inside it."""
+def analyze_part(original: np.ndarray, page: int, box: Box, find_graphics: bool = True) -> PartAnalysis:
+    """Read one box with Mathpix. The box is used exactly as the user drew it.
+    Raises MathpixError with a short reason when Mathpix cannot read it (no key, no internet,
+    key refused, rate limit, this month's limit). Nothing is read on this computer instead:
+    the box stays, marked with the reason, and can be read again."""
+    return _analyze_mathpix(original, page, box, find_graphics)
+
+
+def _analyze_mathpix(original: np.ndarray, page: int, box: Box, find_graphics: bool) -> PartAnalysis:
+    """One Mathpix request for the crop; no OCR or layout model runs here, so the box is done
+    in ~1-3 s. Raises MathpixError with the reason Mathpix could not be used."""
+    from . import usage
+    from .ocr import mathpix
+    from .ocr.glmocr import char_height
+    from .ocr.handseg import binarize
+    from .ocr.latex import markdown_lines
+    from .paper import paper_only
+    cfg = settings()
+    mcfg = cfg.get("mathpix", {}) or {}
+    if mathpix.credentials() is None:
+        raise mathpix.MathpixError('no Mathpix key set - in PowerShell: setx MATHPIX_APP_ID "..." '
+                                   'and setx MATHPIX_APP_KEY "..."')
+    if not usage.can_spend():
+        raise mathpix.MathpixError("this month's Mathpix limit is reached "
+                                   "(mathpix: monthly_limit_usd in configs/default.yaml)")
+    original = paper_only(original)
+    box = box.clip(original.shape[1], original.shape[0])
+    img = cut(original, box)
+    blur, flag = crop_quality(img)
+    r = mathpix.read_image(img, timeout_s=float(mcfg.get("timeout_s", 15)),
+                           smiles=bool(mcfg.get("include_smiles", True)))
+    usage.record(1)
+
+    # figures: Mathpix gives each drawing's outline; the crop is cut from the locked original
+    # by the caller, with a margin grown only into white paper
+    H, W = img.shape[:2]
+    bw = binarize(img)
+    margin = cfg["layout"]["diagram_margin_px"]
+    graphics: list[FoundGraphic] = []
+    local_boxes: list[Box] = []
+    figs: list = []                                         # Mathpix's figure for each graphic
+    if find_graphics:
+        for f in r.figures:
+            lb = f.box.clip(W, H)
+            if lb.w * lb.h > 0.85 * W * H:
+                continue                                    # the whole box is not "a figure in it"
+            sub_ = bw[lb.y0:lb.y1, lb.x0:lb.x1] > 0
+            edge = bool(sub_.size) and ((lb.y0 <= 1 and sub_[:2].any()) or (lb.y1 >= H - 1 and sub_[-2:].any())
+                                        or (lb.x0 <= 1 and sub_[:, :2].any()) or (lb.x1 >= W - 1 and sub_[:, -2:].any()))
+            pad = _pad_into_white(bw, lb, margin)
+            pb = Box(x0=pad.x0 + box.x0, y0=pad.y0 + box.y0, x1=pad.x1 + box.x0, y1=pad.y1 + box.y0)
+            graphics.append(FoundGraphic(kind=RegionKind.diagram, box=pb.clip(original.shape[1], original.shape[0]),
+                                         edge_cut=edge))
+            local_boxes.append(lb)
+            figs.append(f)
+
+    # where each figure sits: Mathpix puts an image link / <smiles> at that spot in the text
+    md, slot_smiles = mathpix.figure_slots(r.text)
+    matched = find_graphics and len(slot_smiles) == len(graphics) and graphics
+    if matched:
+        for i, smi in enumerate(slot_smiles):
+            graphics[i].smiles = smi
+        md = re.sub(r"\x02(\d+)\x02", lambda m: " " + FIG % (int(m.group(1)) + 1) + " ", md)
+    else:
+        md = re.sub(r"\x02\d+\x02", " ", md)
+        if graphics:                                        # SMILES by order when counts differ
+            smis = [x for x in slot_smiles if x]
+            chem = [g for g, f in zip(graphics, figs) if "chem" in f.kind]
+            for g, smi in zip(chem or graphics, smis):
+                g.smiles = smi
+    # Mathpix separates paragraphs with blank lines; the copy is line by line, like the page
+    pairs = [(p.strip(), x.strip()) for p, x in markdown_lines(md) if p.strip()]
+    layout_p = [p for p, _ in pairs]
+    layout_l = [x for _, x in pairs]
+    if not matched and graphics and r.text_letters:         # Mathpix's reading order
+        layout_p, layout_l = _place_in_reading_order(layout_p, layout_l, graphics, figs, r.text_letters)
+    elif not matched and graphics:                          # no text to go by: estimate by height
+        ocr_in = img.copy()
+        for g in graphics:
+            ocr_in[max(0, g.box.y0 - box.y0):g.box.y1 - box.y0, max(0, g.box.x0 - box.x0):g.box.x1 - box.x0] = 255
+        layout_p, layout_l = place_figures(layout_p, ocr_in, graphics, local_boxes, twin=layout_l)
+    elif matched:                                           # "A) [drawing]  B) [drawing]" -> image options
+        pairs_ = re.findall(r"(?:^|\s)\(?[A-Da-d1-4][.)]\s*\{\{fig:(\d+)\}\}", "\n".join(layout_p))
+        if len(pairs_) >= 2:
+            for n in pairs_:
+                graphics[int(n) - 1].kind = RegionKind.option_image
+
+    def strip_fig(lines: list[str]) -> str:
+        out = []
+        for ln in lines:
+            t = re.sub(r"\s*\{\{fig:\d+\}\}\s*", " ", ln).rstrip()
+            if t.strip() or not FIG_RE_ANY.search(ln):
+                out.append(t.strip() if FIG_RE_ANY.search(ln) else t)
+        return "\n".join(out).strip("\n")
+    text, latex = strip_fig(layout_p), strip_fig(layout_l)
+    layout = "\n".join(re.sub(r" {2,}(?=\{\{fig)", " ", ln).rstrip() for ln in layout_p).strip("\n")
+    layout_latex = "\n".join(ln.rstrip() for ln in layout_l).strip("\n")
+    ch = char_height(img, bw)
+    q_no = find_q_no(text)
+    warnings = cut_edges(img, ch, bw)
+    if q_no is not None and contains_next(text, q_no):
+        warnings.append(f"box also contains question {q_no + 1} - make it smaller")
+    return PartAnalysis(page=page, box=box, image=img, text=text, confidence=round(r.confidence, 4),
+                        source_type="handwritten" if r.handwritten else "printed", blur=blur, quality_flag=flag,
+                        q_no=q_no, graphics=graphics, edge_warnings=warnings, layout=layout,
+                        latex=latex, layout_latex=layout_latex, read_by="Mathpix")
+
+
+FIG_RE_ANY = re.compile(r"\{\{fig:\d+\}\}")
+LABELS_ONLY = re.compile(r"\s*(?:\(?[A-Da-d1-4][.)]\s*)+")
+
+
+def _place_in_reading_order(plain: list[str], latex: list[str], graphics: list[FoundGraphic],
+                            figs: list, total: int) -> tuple[list[str], list[str]]:
+    """Mathpix lists text lines and drawings in reading order, so each drawing goes after the
+    line where the text read before it ends (by amount of text: the lines here are the same
+    text, re-wrapped). A line of only option labels ("(a)", "A) B)") followed by as many
+    drawings: those drawings are the options, each right after its label."""
+    from .ocr.mathpix import letters
+    out_total = sum(letters(x) for x in latex) or 1
+    points, n = [(0.0, -1)], 0                          # (share of the text up to here, line)
+    for k, x in enumerate(latex):
+        n += letters(x)
+        points.append((n / out_total, k))
+    after: dict[int, list[int]] = {}
+    for i, f in enumerate(figs):
+        share = f.text_before / total
+        k = min(points, key=lambda p: (abs(p[0] - share), p[1]))[1]
+        after.setdefault(k, []).append(i)
+    rp: list[str] = []
+    rl: list[str] = []
+    mark = lambda ids: "   ".join(FIG % (i + 1) for i in ids)   # noqa: E731
+    if after.get(-1):
+        rp.append(mark(after[-1]))
+        rl.append(mark(after[-1]))
+    for k, (p, x) in enumerate(zip(plain, latex)):
+        ids = after.get(k, [])
+        if ids and LABELS_ONLY.fullmatch(p) and len(OPT_TOKEN.findall(p)) == len(ids) \
+                and all(graphics[i].kind != RegionKind.table for i in ids):
+            for i in ids:
+                graphics[i].kind = RegionKind.option_image
+
+            def put(s: str) -> str:
+                it = iter(ids)
+                return OPT_TOKEN.sub(lambda m: f"{m.group(1)} {FIG % (next(it) + 1)}", s)
+            rp.append(put(p))
+            rl.append(put(x) if len(OPT_TOKEN.findall(x)) == len(ids) else put(p))
+            continue
+        rp.append(p)
+        rl.append(x)
+        if ids:
+            rp.append(mark(ids))
+            rl.append(mark(ids))
+    opts = [g for g in graphics if g.kind == RegionKind.option_image]
+    if len(opts) == 1:                                  # one drawing beside "(a)" is not a set of options
+        opts[0].kind = RegionKind.diagram
+    return rp, rl
+
+
+def _analyze_local(original: np.ndarray, page: int, box: Box, find_graphics: bool = True,
+                   script: str = "auto") -> PartAnalysis:
+    """On this computer: Tesseract pass, then GLM-OCR (or TrOCR / Tesseract).
+    NOT used by the app (Mathpix reads every box) - only the tests' offline stand-in."""
+
+
     from .ocr import get_engine
     from .paper import paper_only
     cfg = settings()
@@ -457,14 +623,18 @@ def _place_figures(lines: list[str], ocr_in: np.ndarray, graphics: list[FoundGra
     alone = [k for k in filled if re.fullmatch(r"\s*\(?[A-Da-d1-4][.)]\s*", out[k])]
     order = [i for r in _visual_rows(local_boxes) for i in sorted(r[2], key=lambda j: local_boxes[j].x0)]
     order = order[len(order) - len(alone):] if len(order) >= len(alone) else []
+    placed: set[int] = set()
     if len(alone) >= 2 and order and all(graphics[i].kind != RegionKind.table for i in order):
         for k, i in zip(alone, order):
             graphics[i].kind = RegionKind.option_image
+            placed.add(i)
             for c in copies:
                 c[k] = f"{c[k].strip()} {FIG % (i + 1)}"
-        return copies
+    # the other drawings (e.g. the question's own diagram above image options): at their height
     for y0, y1, ids in _visual_rows(local_boxes):
-        ids = sorted(ids, key=lambda i: local_boxes[i].x0)
+        ids = sorted((i for i in ids if i not in placed), key=lambda i: local_boxes[i].x0)
+        if not ids:
+            continue
         span = [k for k in filled if y0 <= est[k] <= y1]
         text = "\n".join(out[k] for k in span)
         labels = list(OPT_TOKEN.finditer(text))
@@ -494,11 +664,11 @@ def _place_figures(lines: list[str], ocr_in: np.ndarray, graphics: list[FoundGra
     return result
 
 
-def cut_edges(img: np.ndarray, ch: float) -> list[str]:
+def cut_edges(img: np.ndarray, ch: float, bw: np.ndarray | None = None) -> list[str]:
     """Writing cut by the user's box edge: letters touching the top / bottom / side. The box is
     never changed by the app - this only tells the user, so they can redraw it larger."""
     from .ocr.handseg import binarize
-    bw = (binarize(img) > 0).astype(np.uint8)
+    bw = ((binarize(img) if bw is None else bw) > 0).astype(np.uint8)
     H, W = bw.shape[:2]
     n, _, st, _ = cv2.connectedComponentsWithStats(bw, 8)
     ch = max(ch, 6.0)
@@ -1000,12 +1170,13 @@ def assemble_question(pr: Project, q: QuestionRecord) -> QuestionRecord:
         reasons.extend(p.edge_warnings)
     if not q.text.strip() and not children:
         reasons.append("no content found in the crop")
+    q.read_by = ", ".join(dict.fromkeys(p.read_by for p in parts if p.read_by))
     if any(p.status == "reading" for p in parts):
         q.status = "reading"
         reasons = ["still being read (in the background) - the text appears when it is done"]
     elif any(p.status == "error" for p in parts):
-        q.status = "error"
-        reasons.insert(0, f"reading failed: {q.read_error or 'unknown error'} - redraw the box (M)")
+        q.status = "error"                  # "no content" / "no number" would only be noise here
+        reasons = [f"not read: {q.read_error or 'unknown error'} - press Read again"]
     else:
         q.status = "ready"
     q.review_reasons = reasons

@@ -135,3 +135,14 @@ dialog.chem::backdrop { background: rgb(0 0 0 / 0.35); }
   background: #fff; border: 1px solid var(--line); border-radius: 10px; z-index: 50;
   transform: translateX(-50%); box-shadow: 0 10px 40px rgb(0 0 0 / 0.25); }
 .chem.panel:not(.open) { transform: translateX(-300vw); pointer-events: none; }
+
+/* Mathpix reads every box: the line at upload, a box it could not read */
+.reader-line { margin: 10px 0 4px; }
+.box.failed { box-shadow: 0 0 0 2px #dc2626 inset; }
+.read-error { color: #b91c1c; margin: 0 0 8px; }
+#mathpix-status code { font-size: 12px; background: var(--bg); padding: 1px 4px; border-radius: 3px; }
+.pill.fast { background: color-mix(in srgb, #7c3aed 14%, transparent); color: #6d28d9; }
+/* the two columns share the width; long lines scroll inside their own box */
+.layers > div { min-width: 0; }
+.ocr.math { white-space: pre; max-height: 300px; overflow: auto; }
+.preview { white-space: pre; }

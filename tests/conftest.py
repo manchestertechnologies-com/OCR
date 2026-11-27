@@ -19,19 +19,25 @@ def tmp_data(tmp_path, monkeypatch):
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "models: runs the real offline OCR / layout models (slow)")
+    config.addinivalue_line("markers", "mathpix_path: the real Mathpix code against a fake Mathpix server")
+    config.addinivalue_line("markers", "mathpix: calls the real Mathpix service (needs the key; costs a few images)")
 
 
 @pytest.fixture(autouse=True)
-def fast_engines(request, monkeypatch):
-    """Most tests check the rules around OCR, so they use Tesseract and the ink rules (fast).
-    Tests marked `models` use the configured models (GLM-OCR + PP-DocLayoutV3)."""
-    if request.node.get_closest_marker("models"):
+def offline_reader(request, monkeypatch):
+    """The app reads every box with Mathpix (online, paid). Most tests check the rules around
+    reading - locked crops, question assembly, undo, background reading - so here Mathpix is
+    played by the old offline reader with Tesseract: no network, no cost.
+    Tests marked `mathpix_path` / `mathpix` run the real Mathpix code instead."""
+    if request.node.get_closest_marker("mathpix_path") or request.node.get_closest_marker("mathpix"):
         yield
         return
+    from examocr import analyze
     from examocr.config import settings
     cfg = settings()
     monkeypatch.setitem(cfg["ocr"], "printed_engine", "tesseract")
     monkeypatch.setitem(cfg["ocr"], "handwritten_engine", "tesseract")
     monkeypatch.setitem(cfg["layout"], "figure_model", "")
+    monkeypatch.setattr(analyze, "_analyze_mathpix", lambda original, page, box, find_graphics:
+                        analyze._analyze_local(original, page, box, find_graphics))
     yield

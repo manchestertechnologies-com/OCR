@@ -29,10 +29,11 @@ MODEL = "zai-org/GLM-OCR"
 PROMPTS = {"text": "Text Recognition:", "formula": "Formula Recognition:", "table": "Table Recognition:"}
 
 
-def char_height(image: np.ndarray) -> float:
-    """Median height of letter-sized ink marks (px). 0 when the image has no ink."""
+def char_height(image: np.ndarray, bw: np.ndarray | None = None) -> float:
+    """Median height of letter-sized ink marks (px). 0 when the image has no ink.
+    bw: the image's binarize() result, when the caller already has it."""
     from .handseg import binarize
-    bw = binarize(image)
+    bw = binarize(image) if bw is None else bw
     n, _, st, _ = cv2.connectedComponentsWithStats((bw > 0).astype(np.uint8), 8)
     if n <= 1:
         return 0.0

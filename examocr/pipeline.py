@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import store
-from .analyze import analyze_part, assemble_question
+from .analyze import assemble_question
 from .config import exam_profile, settings
 from .crop import save_png
 from .ingest import load_pages
@@ -34,13 +34,14 @@ SCRIPTS = ("auto", "printed", "handwritten")
 
 
 def create_project(src: Path, exam: str, mode: str = "manual", script: str = "auto") -> Project:
+    """Every box of the paper is read by Mathpix (examocr/analyze.py)."""
     exam_profile(exam)  # validate
     if mode not in ("manual", "auto"):
         raise ValueError("mode must be manual or auto")
     if script not in SCRIPTS:
         raise ValueError("script must be auto, printed or handwritten")
     pr = Project(id=store.new_id(), exam=exam.upper(), source_name=src.name, created=store.now(), mode=mode,
-                 script=script)
+                 script=script, reader="fast")
     d = store.project_dir(pr.id)
     (d / "source").mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, d / "source" / src.name)
@@ -117,12 +118,16 @@ def _auto_crop(pr: Project, originals: list[np.ndarray], wcs: list[WorkingCopy],
             continue
         for pg, bx in boxes:
             c, _ = store._save_crop(pr, originals[pg - 1], b.kind, pg, bx, f"{b.kind.value}_{len(pr.crops) + 1:04d}")
-            pa = analyze_part(originals[pg - 1], pg, bx, script=pr.script)
-            c.text, c.ocr_confidence, c.subject = pa.text, pa.confidence, b.subject
-            c.needs_review = pa.confidence < cfg["ocr"]["confidence_review"] or c.quality_flag != "ok"
-            for j, g in enumerate(pa.graphics, start=1):
-                store._save_crop(pr, originals[pg - 1], g.kind, pg, g.box, f"{c.id}_{g.kind.value}{j}",
-                                 parent=c.id, source_part=c.id)
+            pa, err = store.read_box(originals[pg - 1], pg, bx)
+            c.subject = b.subject
+            if pa is None:                       # not read (Mathpix unavailable): the box stays
+                c.status, c.text, c.needs_review = "error", err or "", True
+            else:
+                c.text, c.ocr_confidence = pa.text, pa.confidence
+                c.needs_review = pa.confidence < cfg["ocr"]["confidence_review"] or c.quality_flag != "ok"
+                for j, g in enumerate(pa.graphics, start=1):
+                    store._save_crop(pr, originals[pg - 1], g.kind, pg, g.box, f"{c.id}_{g.kind.value}{j}",
+                                     parent=c.id, source_part=c.id)
             if b.kind == RegionKind.passage:
                 c.passage_id = b.passage_id
                 passages.append((b, c))

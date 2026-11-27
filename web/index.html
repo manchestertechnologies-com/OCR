@@ -36,18 +36,14 @@
         <select id="exam" required></select>
       </label>
       <label id="drop" class="drop">
-        <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp">
-        <span id="drop-text">Drop a PDF, scan or photo here, or click to choose</span>
+        <input type="file" id="file" accept=".pdf,.doc,.docx,.odt,.rtf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp">
+        <span id="drop-text">Drop a PDF, Word file, scan or photo here, or click to choose</span>
       </label>
       <p class="hint">You crop each question, diagram or passage yourself after upload. The app reads
         exactly what is inside your box: text, formulas and the drawings in it.</p>
-      <label>Paper is
-        <select id="script">
-          <option value="auto" selected>Detect printed / handwritten</option>
-          <option value="printed">Printed</option>
-          <option value="handwritten">Handwritten</option>
-        </select>
-      </label>
+      <p class="reader-line">⚡ Every box is read by <b>Mathpix</b> (online): about <b>1–3 s</b> per question,
+        ≈ <b id="rc-price">₹0.17</b> each. Only the boxes you draw are sent, never the whole page.</p>
+      <p id="mathpix-status" class="hint"></p>
       <p class="hint">A PDF or the original image works best. Screenshots and compressed photos lose detail.</p>
       <button type="submit" class="primary">Upload</button>
     </form>
@@ -97,7 +93,7 @@
       <p class="hint">Drag a box around a question; its text, diagrams, options and type are extracted.
         Keys: <b>Q</b> question · <b>P</b> next part · <b>D</b> diagram · <b>T</b> table · <b>I</b> image option ·
         <b>A</b> passage · <b>M</b> move box · <b>Esc</b> select · <b>←/→</b> page.</p>
-      <p id="busy" class="busy" hidden>Reading your crop… (the OCR model runs on this computer: about 30-90 s per question)</p>
+      <p id="busy" class="busy" hidden>Saving…</p>
     </div>
     <div class="pane side">
       <div class="filters">
@@ -124,8 +120,7 @@
             <h4>Editable copy</h4>
             <p class="hint">Type to fix the text. Drag a diagram with the mouse to move it.</p>
             <div id="d-text" class="editor" contenteditable="true" spellcheck="false"></div>
-            <p class="hint">Formulas: <code>$\frac{M}{3}$</code>, chemistry <code>$\ce{K2MnO4}$</code>.
-              Preview (as it will be exported):</p>
+            <p class="hint">Write formulas between $ signs, e.g. <code>$x^2$</code>. The preview below shows them as they will print.</p>
             <div id="d-preview" class="preview math"></div>
             <div id="d-diff" class="diff"></div>
             <div id="d-structs"></div>

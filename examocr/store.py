@@ -77,7 +77,7 @@ def list_projects() -> list[dict]:
     for p in sorted((data_dir() / "projects").glob("*/project.json"), key=os.path.getmtime, reverse=True):
         try:
             pr = Project.model_validate_json(p.read_text(encoding="utf-8"))
-            out.append({"id": pr.id, "exam": pr.exam, "source_name": pr.source_name,
+            out.append({"id": pr.id, "exam": pr.exam, "source_name": pr.source_name, "reader": pr.reader,
                         "created": pr.created, "status": pr.status,
                         "questions": len(pr.questions),
                         "needs_review": sum(q.needs_review for q in pr.questions)})
@@ -271,10 +271,32 @@ def attach_part(pr: Project, original: np.ndarray, q: QuestionRecord, page_no: i
     diagram / table / image option inside it as its own locked crop, and store the text.
     (The web app does the same in two steps - reserve_part now, complete_part in the
     background - so drawing a box answers in milliseconds.)"""
-    from .analyze import analyze_part
     part = reserve_part(pr, original, q, page_no, box, index=index, snap=snap)
-    fill_part(pr, original, q, part, analyze_part(original, page_no, part.box, script=pr.script))
+    pa, err = read_box(original, page_no, part.box)
+    _put_reading(pr, original, q, part, pa, err)
     return part
+
+
+def read_box(original: np.ndarray, page_no: int, box: Box):
+    """Read one box with Mathpix -> (analysis, None), or (None, the reason it was not read).
+    A box Mathpix cannot read stays where it is, marked with the reason, to be read again."""
+    from .analyze import analyze_part
+    from .ocr.mathpix import MathpixError
+    try:
+        return analyze_part(original, page_no, box), None
+    except MathpixError as e:
+        return None, str(e)
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _put_reading(pr: Project, original: np.ndarray, q: QuestionRecord, part: QuestionPart, pa, err) -> None:
+    if pa is not None:
+        fill_part(pr, original, q, part, pa)
+        q.read_error = None
+    else:
+        part.status = "error"
+        q.read_error = err
 
 
 def reserve_part(pr: Project, original: np.ndarray, q: QuestionRecord, page_no: int, box: Box,
@@ -308,6 +330,8 @@ def fill_part(pr: Project, original: np.ndarray, q: QuestionRecord, part: Questi
         gc, gimg = _save_crop(pr, original, g.kind, part.page, g.box, f"{part.crop_id}_{g.kind.value}{j}",
                               parent=q.id, source_part=part.crop_id)
         gc.text = g.labels
+        if getattr(g, "smiles", None):                  # Mathpix read the structure: a suggestion
+            gc.smiles_suggested, gc.suggest_conf = g.smiles, round(pa.confidence, 3)
         # edge_cut checks the drawing's own ink against the question box edge. (A plain
         # "ink on the border" test on the padded crop fires on neighbouring text.)
         gc.needs_review = g.edge_cut
@@ -322,6 +346,7 @@ def fill_part(pr: Project, original: np.ndarray, q: QuestionRecord, part: Questi
     part.ocr_confidence, part.source_type = pa.confidence, pa.source_type
     part.blur_score, part.quality_flag = pa.blur, pa.quality_flag
     part.edge_warnings = pa.edge_warnings
+    part.read_by = pa.read_by
     part.status = "ready"
     # the number printed on the paper wins over one guessed from the previous question (a box
     # read in the background was assembled - and its number guessed - before it was read)
@@ -335,7 +360,7 @@ def complete_part(pid: str, qid: str, crop_id: str) -> None:
     the project lock; if the part was removed or moved meanwhile, the result is dropped."""
     import time
 
-    from .analyze import analyze_part, assemble_question
+    from .analyze import assemble_question
     pr = load(pid)
     q = next((x for x in pr.questions if x.id == qid), None)
     part = next((p for p in q.parts if p.crop_id == crop_id), None) if q else None
@@ -343,22 +368,14 @@ def complete_part(pid: str, qid: str, crop_id: str) -> None:
         return
     original = page_image(pid, _page(pr, part.page))
     t0 = time.time()
-    try:
-        pa, err = analyze_part(original, part.page, part.box, script=pr.script), None
-    except Exception as e:                   # the box stays, marked with the reason
-        pa, err = None, f"{type(e).__name__}: {e}"
+    pa, err = read_box(original, part.page, part.box)
     with _lock(pid):
         pr = load(pid)
         q = next((x for x in pr.questions if x.id == qid), None)
         part = next((p for p in q.parts if p.crop_id == crop_id), None) if q else None
         if part is None or part.status != "reading":
             return                           # deleted / re-cropped while it was being read
-        if pa is not None:
-            fill_part(pr, original, q, part, pa)
-            q.read_error = None
-        else:
-            part.status = "error"
-            q.read_error = err
+        _put_reading(pr, original, q, part, pa, err)
         q.read_seconds = round(time.time() - t0, 1)
         assemble_question(pr, q)
         _sort_questions(pr)
@@ -367,17 +384,13 @@ def complete_part(pid: str, qid: str, crop_id: str) -> None:
 
 def complete_crop(pid: str, cid: str, subject: str | None = None) -> None:
     """Background job for a passage / header / section box: its text and drawings."""
-    from .analyze import analyze_part
     from .config import settings
     pr = load(pid)
     c = next((x for x in pr.crops if x.id == cid), None)
     if c is None or c.status != "reading":
         return
     original = page_image(pid, _page(pr, c.page))
-    try:
-        pa, err = analyze_part(original, c.page, c.box, script=pr.script), None
-    except Exception as e:
-        pa, err = None, f"{type(e).__name__}: {e}"
+    pa, err = read_box(original, c.page, c.box)
     with _lock(pid):
         pr = load(pid)
         c = next((x for x in pr.crops if x.id == cid), None)
@@ -456,7 +469,7 @@ def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str 
     text, figures and type are filled in by the background reader (examocr/worker.py).
     """
     from . import worker
-    from .analyze import analyze_part, assemble_question
+    from .analyze import assemble_question
     from .config import settings
     jobs: list[tuple[str, object]] = []
     with _lock(pid):
@@ -525,8 +538,10 @@ def add_manual_crop(pid: str, page_no: int, box: Box, kind: str, parent_id: str 
                 jobs.append((c.id, lambda cid=c.id: complete_crop(pid, cid, subject)))
             else:
                 c.status = "reading"
-                _fill_crop(pr, original, c, analyze_part(original, page_no, box, script=pr.script),
-                           subject, settings()["ocr"]["confidence_review"])
+                pa, err = read_box(original, page_no, box)
+                _fill_crop(pr, original, c, pa, subject, settings()["ocr"]["confidence_review"])
+                if pa is None:
+                    c.status, c.text = "error", err or ""
             if k == RegionKind.passage:
                 c.passage_id = f"P{sum(1 for x in pr.crops if x.kind == RegionKind.passage)}"
             result["crop"] = c.model_dump()
@@ -703,23 +718,39 @@ def clear_structure(pid: str, cid: str) -> dict:
 
 
 def suggest_structure(pid: str, cid: str) -> dict:
-    """MolScribe reads the figure's drawing -> a SUGGESTION (never applied by itself).
-    Results that are not a real molecule (wildcard atoms, broken fragments) are refused."""
-    from . import chem
+    """Mathpix reads the figure's drawing -> a SUGGESTION (never applied by itself).
+    Results that are not a real molecule (wildcard atoms, broken fragments) are refused.
+    RuntimeError when Mathpix cannot be used (no key, no internet, monthly limit)."""
+    from . import chem, usage
+    from .ocr import mathpix
     pr = load(pid)
     c, _ = _figure_crop(pr, cid)
     img = load_png(project_dir(pid) / (c.clean_path or c.path))
-    smiles, mf, conf = chem.recognise(img)
-    usable = "*" not in smiles and "." not in smiles and conf >= 0.5
+    if not usage.can_spend():
+        raise RuntimeError("this month's Mathpix limit is reached")
+    try:
+        r = mathpix.read_image(img, smiles=True)
+    except mathpix.MathpixError as e:
+        raise RuntimeError(str(e)) from None
+    usage.record(1)
+    found = [s.strip() for s in mathpix.SMILES_TAG.findall(r.text) if s.strip()]
+    smiles = max(found, key=len) if found else ""   # the drawing itself, not a stray fragment
+    conf = r.confidence
+    mol = None
+    if smiles and "*" not in smiles and "." not in smiles:
+        try:
+            mol = chem.mol_from(smiles=smiles)
+        except ValueError:
+            mol = None
     with _lock(pid):
         pr = load(pid)
         c, _ = _figure_crop(pr, cid)
-        c.smiles_suggested, c.suggest_conf = (smiles, round(conf, 3)) if usable else (None, round(conf, 3))
+        c.smiles_suggested = chem.canonical_smiles(mol) if mol is not None else None
+        c.suggest_conf = round(conf, 3)
         save(pr)
-    if not usable:
-        raise ValueError(f"the drawing could not be read as a molecule (confidence {conf:.2f}) - "
-                         "draw it in the structure editor")
-    return {"smiles": smiles, "molfile": mf, "confidence": round(conf, 3)}
+    if mol is None:
+        raise ValueError("Mathpix could not read the drawing as a molecule - draw it in the structure editor")
+    return {"smiles": chem.canonical_smiles(mol), "molfile": chem.molfile(mol), "confidence": round(conf, 3)}
 
 
 def reset(pid: str, qid: str) -> QuestionRecord:

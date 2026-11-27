@@ -136,6 +136,7 @@ class QuestionPart(BaseModel):
     latex_text: str = ""
     layout_latex: str = ""
     status: str = "ready"              # reading (background OCR still running) | ready | error
+    read_by: str = ""                  # "Mathpix" | "this computer"
     ocr_confidence: float = 0.0
     source_type: str = "printed"
     blur_score: float = 0.0
@@ -165,6 +166,7 @@ class QuestionRecord(BaseModel):
     text_edited: Optional[str] = None          # the reviewer's copy (LaTeX source, [diagram n])
     # reading happens in the background: "reading" until the OCR result is in
     status: str = "ready"                      # reading | ready | error
+    read_by: str = ""                          # "Mathpix" | "this computer" | both (multi-part)
     read_error: Optional[str] = None
     read_seconds: Optional[float] = None
     options: list[str] = Field(default_factory=list)
@@ -209,7 +211,8 @@ class Project(BaseModel):
     source_name: str
     created: str
     mode: str = "manual"             # manual: user crops | auto: model crops
-    script: str = "auto"             # auto | printed | handwritten - picks the OCR engine
+    script: str = "auto"             # auto | printed | handwritten (Mathpix detects it itself)
+    reader: str = "fast"             # every box is read by Mathpix; "accurate" = older papers only
     status: str = "processing"       # processing | ready | error
     error: Optional[str] = None
     pages: list[PageInfo] = Field(default_factory=list)
