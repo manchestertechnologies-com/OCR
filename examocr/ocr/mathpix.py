@@ -9,7 +9,8 @@ Only the crop is sent, never the page. The key is never logged or sent to the br
 Key, first found wins:
   1. environment variables MATHPIX_APP_ID / MATHPIX_APP_KEY
   2. Windows user variables set with `setx` (read from the registry, no restart needed)
-  3. configs/secrets.yaml  ->  mathpix: {app_id: ..., app_key: ...}   (git-ignored)
+  3. .env in the project folder (copy .env.example; git-ignored; read on every request)
+  4. configs/secrets.yaml  ->  mathpix: {app_id: ..., app_key: ...}   (git-ignored)
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -28,6 +30,7 @@ from ..schemas import Box
 log = logging.getLogger(__name__)
 API = "https://api.mathpix.com/v3/text"
 MAX_B64 = 4_500_000                   # Mathpix's JSON body limit is 5 MB
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 FIGURE_TYPES = {"diagram", "chart", "chemistry", "chemical_diagram", "figure", "image"}
 
 
@@ -72,9 +75,34 @@ def _registry_user_env(name: str) -> str | None:
         return None
 
 
+def read_env_file(path: Path) -> dict[str, str]:
+    """KEY=value lines of a .env file (no extra package): blank lines and # comments are
+    skipped, `export ` is allowed, quotes around a value are removed."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()   # -sig: Notepad's BOM
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#") or "=" not in ln:
+            continue
+        k, v = ln.split("=", 1)
+        k, v = k.strip().removeprefix("export ").strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+            v = v[1:-1]
+        elif " #" in v:
+            v = v.split(" #", 1)[0].rstrip()                       # a comment after the value
+        out[k] = v
+    return out
+
+
 def credentials() -> tuple[str, str] | None:
-    app_id = os.environ.get("MATHPIX_APP_ID") or _registry_user_env("MATHPIX_APP_ID")
-    app_key = os.environ.get("MATHPIX_APP_KEY") or _registry_user_env("MATHPIX_APP_KEY")
+    env = read_env_file(ENV_FILE)
+    app_id = (os.environ.get("MATHPIX_APP_ID") or _registry_user_env("MATHPIX_APP_ID")
+              or env.get("MATHPIX_APP_ID"))
+    app_key = (os.environ.get("MATHPIX_APP_KEY") or _registry_user_env("MATHPIX_APP_KEY")
+               or env.get("MATHPIX_APP_KEY"))
     if not (app_id and app_key):
         try:
             import yaml

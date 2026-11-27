@@ -92,9 +92,20 @@ def _code_fingerprint() -> str:
 STARTED_WITH = _code_fingerprint()
 
 
+def _page() -> str:
+    """index.html asking for app.js / styles.css WITH their version. /static is sent without
+    cache rules, so a browser keeps an old app.js for hours: an old app.js with a new page
+    stopped every upload, silently (it read a form field the page no longer has). A new
+    version is a new address, so the browser loads it at once."""
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "styles.css"):
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={(WEB / name).stat().st_mtime_ns}"')
+    return html
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (WEB / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(_page(), headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/favicon.ico", include_in_schema=False)

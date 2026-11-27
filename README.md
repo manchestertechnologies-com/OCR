@@ -18,9 +18,12 @@ python -m venv C:\Users\DELL\.venvs\examocr
 C:\Users\DELL\.venvs\examocr\Scripts\pip install -r requirements.txt
 C:\Users\DELL\.venvs\examocr\Scripts\python -m examocr.cli download-models   # browser libraries, once
 
-# The Mathpix key (console.mathpix.com -> your organization -> API Keys), once:
+# The Mathpix key (console.mathpix.com -> your organization -> API Keys), once - either
+copy .env.example .env          # then open .env and fill in your app_id and app_key
+# or
 setx MATHPIX_APP_ID "your-app-id"
 setx MATHPIX_APP_KEY "your-app-key"
+# .env is git-ignored: it is never pushed. Never paste the key in chat or code.
 
 # Web app: upload, review and export
 C:\Users\DELL\.venvs\examocr\Scripts\python -m examocr.cli serve

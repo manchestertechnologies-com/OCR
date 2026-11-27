@@ -223,6 +223,30 @@ def test_recognise_structure_with_mathpix(fast):
         store.suggest_structure(pr.id, cid)
 
 
+def test_key_from_env_file(tmp_path, monkeypatch):
+    """The key can sit in .env (a copy of .env.example) - and git never uploads that file."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from examocr import config
+    from examocr.ocr import mathpix
+    for name in ("MATHPIX_APP_ID", "MATHPIX_APP_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(mathpix, "_registry_user_env", lambda name: None)   # never the real key
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)                     # no secrets.yaml
+    env = tmp_path / ".env"
+    env.write_text('﻿# a comment\n\nexport MATHPIX_APP_ID = "my-id"\nMATHPIX_APP_KEY=abc123  # the key\n',
+                   encoding="utf-8")                                        # BOM, as Notepad saves it
+    monkeypatch.setattr(mathpix, "ENV_FILE", env)
+    assert mathpix.credentials() == ("my-id", "abc123")
+    monkeypatch.setattr(mathpix, "ENV_FILE", tmp_path / "missing.env")
+    assert mathpix.credentials() is None
+    if shutil.which("git"):
+        root = Path(mathpix.__file__).resolve().parents[2]
+        assert subprocess.run(["git", "check-ignore", "-q", ".env"], cwd=root).returncode == 0
+
+
 def test_big_crop_is_resized_under_the_limit():
     import numpy as np
 

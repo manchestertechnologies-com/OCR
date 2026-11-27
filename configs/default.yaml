@@ -53,8 +53,9 @@ chem:
 
 mathpix:
   # Reads every box: Mathpix online OCR, ~1-3 s per question (console.mathpix.com).
-  # Key: setx MATHPIX_APP_ID "..." and setx MATHPIX_APP_KEY "..."  (or configs/secrets.yaml,
-  # which is git-ignored). Without a key (or past the limit) boxes are marked "not read".
+  # Key: .env in the project folder (copy .env.example), or setx MATHPIX_APP_ID "..." and
+  # setx MATHPIX_APP_KEY "..." (or configs/secrets.yaml). .env and secrets.yaml are git-ignored.
+  # Without a key (or past the limit) boxes are marked "not read".
   monthly_limit_usd: 20         # stop sending to Mathpix this month after this much; 0 = no limit
   price_per_image_usd: 0.002    # Mathpix v3/text price (first 1M images); for the usage counter
   inr_per_usd: 85               # only for showing the cost in rupees

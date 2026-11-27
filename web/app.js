@@ -1,7 +1,9 @@
 "use strict";
 const $ = (s) => document.querySelector(s);
 const api = async (url, opts = {}) => {
-  const r = await fetch(url, opts);
+  let r;
+  try { r = await fetch(url, opts); }
+  catch { throw new Error("cannot reach the app server - is it running? Start it with: python -m examocr.cli serve"); }
   if (!r.ok) {
     let msg = r.statusText;
     try { const j = await r.json(); msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch {}
@@ -78,12 +80,12 @@ $("#upload-form").onsubmit = async (e) => {
     $("#drop-text").textContent = "Choose a file first: click here or drop a PDF, Word file, scan or photo.";
     return;
   }
-  const fd = new FormData(); fd.append("file", f); fd.append("exam", $("#exam").value);
-  fd.append("mode", "manual");             // the user crops; the app never auto-crops
   $("#progress").hidden = false; $("#progress-msg").textContent = "Uploading…";
   $("#bar-fill").style.width = "0%";
   setUploading(true);                     // a second click would create a duplicate paper
-  try {
+  try {                                   // any problem is shown here - an upload never fails silently
+    const fd = new FormData(); fd.append("file", f); fd.append("exam", $("#exam").value);
+    fd.append("mode", "manual");          // the user crops; the app never auto-crops
     const { id } = await api("/api/projects", { method: "POST", body: fd });
     pollProgress(id);
   } catch (err) { $("#progress-msg").textContent = "Upload failed: " + err.message; setUploading(false); }

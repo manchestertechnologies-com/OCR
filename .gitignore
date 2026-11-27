@@ -12,6 +12,7 @@ training/runs/
 # browser libraries: fetched by `python -m examocr.cli download-models` (tools/fetch_web_vendor.py)
 web/vendor/
 
-# Mathpix key (never commit): configs/secrets.yaml -> mathpix: {app_id: ..., app_key: ...}
+# Mathpix key (never commit): .env (copy of .env.example) or configs/secrets.yaml
+.env
 configs/secrets.yaml
 data/mathpix_usage.json
