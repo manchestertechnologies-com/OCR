@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Exam Paper OCR</title>
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<title>GENPREP · Exam Question Builder</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
 <link rel="stylesheet" href="/static/styles.css">
 <script>
   // MathJax + mhchem (offline copy in /static/vendor): $...$ inline, $$...$$ display, \ce{...} chemistry
@@ -20,137 +20,324 @@
 <script src="/static/vendor/3Dmol-min.js" defer></script>
 </head>
 <body>
-<header class="top">
-  <h1>Exam Paper OCR</h1>
-  <nav><button id="nav-home" class="link">Papers</button></nav>
+<!-- ============================================================== app bar -->
+<header class="appbar">
+  <a class="brand" href="#/papers" title="GENPREP home">
+    <img src="/static/logo.png" alt="GENPREP logo" width="44" height="44">
+    <span class="brand-text"><small>by Manchester Technologies</small></span>
+  </a>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button id="nav-home" class="tab" role="tab" data-tab="papers"><span class="ico">▤</span>Papers</button>
+    <button id="tab-build" class="tab" role="tab" data-tab="build"><span class="ico">✂</span>Build questions</button>
+    <button id="tab-bank" class="tab" role="tab" data-tab="bank"><span class="ico">☰</span>Question bank</button>
+    <button id="tab-test" class="tab" role="tab" data-tab="test"><span class="ico">✎</span>Test</button>
+  </nav>
 </header>
 <div id="stale" class="banner bad" hidden>The app's code was updated but the server is still running the old code,
   so new crops won't use the fixes. Restart it: press <b>Ctrl+C</b> in the server's terminal, then run
   <code>.\.venv\Scripts\python -m examocr.cli serve</code> again and refresh this page.</div>
 
-<main id="home">
-  <section class="card upload">
-    <h2>Upload a question paper</h2>
-    <form id="upload-form">
-      <label>Exam
-        <select id="exam" required></select>
-      </label>
-      <label id="drop" class="drop">
-        <input type="file" id="file" accept=".pdf,.doc,.docx,.odt,.rtf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp">
-        <span id="drop-text">Drop a PDF, Word file, scan or photo here, or click to choose</span>
-      </label>
-      <p class="hint">You crop each question, diagram or passage yourself after upload. The app reads
-        exactly what is inside your box: text, formulas and the drawings in it.</p>
-      <p class="reader-line">⚡ Every box is read by <b>Mathpix</b> (online): about <b>1–3 s</b> per question,
-        ≈ <b id="rc-price">₹0.17</b> each. Only the boxes you draw are sent, never the whole page.</p>
-      <p id="mathpix-status" class="hint"></p>
-      <p class="hint">A PDF or the original image works best. Screenshots and compressed photos lose detail.</p>
-      <button type="submit" class="primary">Upload</button>
-    </form>
-    <div id="progress" hidden>
-      <div class="bar"><div id="bar-fill"></div></div>
-      <p id="progress-msg"></p>
+<!-- ============================================================== Papers -->
+<main id="home" class="view">
+  <div class="page-head">
+    <div>
+      <h1>Question papers</h1>
+      <p class="sub">Upload a paper, crop its questions, check what was read, and build your test.</p>
     </div>
-  </section>
-  <section class="card">
-    <h2>Papers</h2>
-    <table id="projects"><thead><tr><th>File</th><th>Exam</th><th>Status</th><th>Questions</th><th>To review</th><th></th></tr></thead><tbody></tbody></table>
-  </section>
+    <div class="stats" id="home-stats"></div>
+  </div>
+  <div class="home-grid">
+    <section class="card upload">
+      <h2>Upload a question paper</h2>
+      <form id="upload-form">
+        <label class="field">Exam
+          <select id="exam" required></select>
+        </label>
+        <label id="drop" class="drop">
+          <input type="file" id="file" accept=".pdf,.doc,.docx,.odt,.rtf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp">
+          <span class="drop-ico">⬆</span>
+          <span id="drop-text">Drop a PDF, Word file, scan or photo here, or click to choose</span>
+          <span class="drop-types">PDF · DOCX · JPG · PNG · TIFF</span>
+        </label>
+        <p class="hint">You crop each question, diagram or passage yourself after upload. The app reads
+          exactly what is inside your box: text, formulas and the drawings in it.</p>
+        <p class="reader-line">⚡ Every box is read by <b>Mathpix</b> (online): about <b>1–3 s</b> per question,
+          ≈ <b id="rc-price">₹0.17</b> each. Only the boxes you draw are sent, never the whole page.</p>
+        <p id="mathpix-status" class="hint"></p>
+        <p class="hint">A PDF or the original image works best. Screenshots and compressed photos lose detail.</p>
+        <button type="submit" class="primary big">Upload paper</button>
+      </form>
+      <div id="progress" hidden>
+        <div class="bar"><div id="bar-fill"></div></div>
+        <p id="progress-msg"></p>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>Your papers</h2><input id="paper-search" class="search" type="search" placeholder="Search papers…"></div>
+      <div class="table-wrap">
+        <table id="projects"><thead><tr><th>File</th><th>Exam</th><th>Status</th><th>Questions</th><th>To review</th><th></th></tr></thead><tbody></tbody></table>
+      </div>
+    </section>
+  </div>
 </main>
 
-<main id="review" hidden>
-  <div class="toolbar">
-    <strong id="r-title"></strong>
-    <span id="r-status" class="pill"></span>
-    <span class="spacer"></span>
-    <label>Page <select id="page-select"></select></label>
-    <label>Draw
-      <select id="draw-kind">
-        <option value="question">Q · new question</option>
-        <option value="part">P · next part of selected question</option>
-        <option value="diagram">D · diagram for selected question</option>
-        <option value="table">T · table for selected question</option>
-        <option value="option_image">I · image option for selected question</option>
-        <option value="passage">A · passage (shared by questions)</option>
-        <option value="section">S · section heading</option>
-        <option value="header">H · header / instructions</option>
-        <option value="recrop">M · move selected question box</option>
-        <option value="">Esc · off (select boxes)</option>
-      </select>
-    </label>
-    <label>Subject <select id="cur-subject"><option value="">auto</option></select></label>
-    <label>Passage <select id="cur-passage"><option value="">none</option></select></label>
-    <button id="btn-verify">Run round-trip check</button>
-    <a id="btn-export" class="button primary">Export ZIP</a>
+<!-- ============================================================== Build questions -->
+<main id="review" class="view" hidden>
+  <div id="review-empty" class="empty-state" hidden>
+    <img src="/static/logo.png" alt="" width="88" height="88">
+    <h2>No paper open</h2>
+    <p>Open a paper from <b>Papers</b> to start cropping its questions.</p>
+    <button class="primary" data-goto="papers">Go to Papers</button>
   </div>
-  <div id="rt-report" class="banner" hidden></div>
-  <div class="split">
-    <div class="pane page-pane">
-      <div id="page-wrap">
-        <img id="page-img" alt="Original page">
-        <div id="overlay"></div>
+  <div id="review-body">
+    <div class="toolbar">
+      <div class="paper-title">
+        <strong id="r-title"></strong>
+        <span id="r-status" class="pill"></span>
       </div>
-      <p class="hint">Drag a box around a question; its text, diagrams, options and type are extracted.
-        Keys: <b>Q</b> question · <b>P</b> next part · <b>D</b> diagram · <b>T</b> table · <b>I</b> image option ·
-        <b>A</b> passage · <b>M</b> move box · <b>Esc</b> select · <b>←/→</b> page.</p>
-      <p id="busy" class="busy" hidden>Saving…</p>
+      <span class="spacer"></span>
+      <label class="field small">Subject <select id="cur-subject"><option value="">auto</option></select></label>
+      <label class="field small">Passage <select id="cur-passage"><option value="">none</option></select></label>
+      <span id="read-queue" class="pill warn" hidden></span>
+      <span id="busy" class="busy" hidden>Saving…</span>
+      <button id="btn-verify" class="ghost" title="Check that every crop matches the original page">Round-trip check</button>
+      <a id="btn-export" class="button primary" title="Download questions (JSON, HTML, Word) and all images">Export ZIP</a>
     </div>
-    <div class="pane side">
-      <div class="filters">
-        <label><input type="checkbox" id="only-review"> Needs review only</label>
-        <span id="q-count"></span>
-      </div>
-      <ol id="q-list"></ol>
-      <div id="q-detail" hidden>
-        <div class="detail-head">
-          <h3 id="d-title"></h3>
-          <span id="d-type" class="pill"></span>
-          <span id="d-conf" class="pill"></span>
-        </div>
-        <p id="d-signals" class="signals"></p>
-        <p id="d-snap" class="signals"></p>
-        <ul id="d-reasons" class="reasons"></ul>
-        <div class="layers">
-          <div>
-            <h4>Original (locked)</h4>
-            <div id="d-crops"></div>
-            <div id="d-ocr" class="ocr math"></div>
+    <div id="rt-report" class="banner" hidden></div>
+
+    <div class="workspace">
+      <!-- ---------------- left: the paper -->
+      <section class="pane viewer">
+        <div class="viewer-bar">
+          <div class="seg">
+            <button id="pg-prev" title="Previous page (←)">◀</button>
+            <select id="page-select" title="Page"></select>
+            <button id="pg-next" title="Next page (→)">▶</button>
+            <button id="thumbs-toggle" title="Show / hide page thumbnails">▦</button>
           </div>
-          <div>
-            <h4>Editable copy</h4>
-            <p class="hint">Type to fix the text. Drag a diagram with the mouse to move it.</p>
+          <div class="seg">
+            <button id="zoom-out" title="Zoom out (−)">−</button>
+            <span id="zoom-label">100%</span>
+            <button id="zoom-in" title="Zoom in (+)">+</button>
+            <button id="zoom-fit" title="Fit width (0)">Fit</button>
+          </div>
+          <label class="field small tool">Tool
+            <select id="draw-kind" title="What the next box you draw is">
+              <option value="question">✂ New question (Q)</option>
+              <option value="part">➕ Next part of selected question (P)</option>
+              <option value="diagram">▧ Diagram for selected question (D)</option>
+              <option value="table">▦ Table for selected question (T)</option>
+              <option value="option_image">◩ Image option for selected question (I)</option>
+              <option value="passage">¶ Passage, shared by questions (A)</option>
+              <option value="section">§ Section heading (S)</option>
+              <option value="header">ℹ Header / instructions (H)</option>
+              <option value="recrop">⤧ Redraw selected question's box (M)</option>
+              <option value="">☝ Select boxes (Esc)</option>
+            </select>
+          </label>
+        </div>
+        <div class="viewer-body">
+          <div id="thumbs" class="thumbs"></div>
+          <div id="page-scroll" class="page-scroll" tabindex="-1">
+            <div id="page-wrap">
+              <img id="page-img" alt="Original page">
+              <div id="overlay"></div>
+            </div>
+          </div>
+        </div>
+        <p class="hint viewer-hint" title="Keys: Q question · P next part · D diagram · T table · I image option · A passage · S section · H header · M redraw box · Esc select · ←/→ page · +/− zoom · Ctrl+wheel zoom">
+          Drag a box around a question → adjust its corners → <b>✓ Read</b> (Enter) · click a box to open it ·
+          <b>Q P D T I A M</b> tools · <b>Esc</b> select · <b>←/→</b> page · <b>+/−</b> zoom</p>
+      </section>
+
+      <!-- ---------------- right: the question builder -->
+      <section class="pane builder">
+        <div id="b-empty" class="builder-empty">
+          <h3>Question builder</h3>
+          <ol class="steps">
+            <li><b>Draw a box</b> around a question on the paper.</li>
+            <li><b>Adjust</b> it by dragging its corners or edges.</li>
+            <li>Click <b>✓ Read</b>: text, formulas, options and images appear here.</li>
+            <li>Check and fix them, then <b>Save question</b>. It goes to the <b>Questions</b> panel below.</li>
+          </ol>
+          <p class="hint">Click a saved question below (or a box on the paper) to edit it.</p>
+        </div>
+
+        <div id="b-pending" hidden>
+          <div class="builder-head"><h3 id="pend-title">New question box</h3><span class="pill">not read yet</span></div>
+          <canvas id="pend-canvas" class="pend-canvas"></canvas>
+          <p class="hint" id="pend-hint">Drag the corners or edges on the paper to fit the question exactly.
+            Nothing is read (and nothing is charged) until you click Read.</p>
+          <div class="actions">
+            <button id="pend-cancel" class="ghost">✕ Cancel <kbd>Esc</kbd></button>
+            <span class="spacer"></span>
+            <button id="pend-ok" class="primary">✓ Read question <kbd>Enter</kbd></button>
+          </div>
+        </div>
+
+        <div id="q-detail" hidden>
+          <div class="builder-head">
+            <h3 id="d-title"></h3>
+            <span id="d-state" class="pill"></span>
+            <span id="d-type" class="pill"></span>
+            <span id="d-conf" class="pill"></span>
+          </div>
+          <ul id="d-reasons" class="reasons"></ul>
+          <div id="d-alert"></div>
+
+          <div class="crop-block">
+            <div id="d-crops"></div>
+            <div class="crop-actions">
+              <button id="b-adjust" class="ghost small" title="Adjust this question's box on the paper and read it again">⤧ Adjust box</button>
+              <button id="b-addpart" class="ghost small" title="The question continues in another column or page">➕ Add part</button>
+              <button id="b-adddiag" class="ghost small" title="Draw a diagram the reader missed">▧ Add diagram</button>
+            </div>
+          </div>
+
+          <div class="labels">
+            <label class="field">Q no <input type="text" id="d-qno" size="4" inputmode="numeric"></label>
+            <label class="field">Type <select id="d-qtype"></select></label>
+            <label class="field">Subject <input type="text" id="d-subject" size="12" list="subjects-list"></label>
+            <datalist id="subjects-list"></datalist>
+            <label class="field">Passage <select id="d-passage"><option value="">none</option></select></label>
+          </div>
+
+          <div class="subtabs" role="tablist">
+            <button class="subtab active" data-sub="question">Question</button>
+            <button class="subtab" data-sub="options">Options <span id="opt-count" class="count"></span></button>
+            <button class="subtab" data-sub="figures">Images &amp; structures <span id="fig-count" class="count"></span></button>
+            <button class="subtab" data-sub="read">Mathpix reading</button>
+            <button class="subtab" data-sub="details">Details</button>
+          </div>
+
+          <div class="subpanel" data-sub="question">
+            <p class="hint">Type to fix the text. Drag an image with the mouse to move it.
+              Formulas go between $ signs, e.g. <code>$x^2$</code>.</p>
             <div id="d-text" class="editor" contenteditable="true" spellcheck="false"></div>
-            <p class="hint">Write formulas between $ signs, e.g. <code>$x^2$</code>. The preview below shows them as they will print.</p>
+            <h4>Preview <span class="hint">(as it will print)</span></h4>
             <div id="d-preview" class="preview math"></div>
             <div id="d-diff" class="diff"></div>
+          </div>
+
+          <div class="subpanel" data-sub="options" hidden>
+            <p class="hint">Edit, add or remove options. Changes go into the question text (press Save question to keep them).</p>
+            <div id="opt-editor"></div>
+            <div class="actions">
+              <button id="opt-add" class="ghost small">➕ Add option</button>
+              <button id="opt-relabel" class="ghost small" title="Relabel options as (A) (B) (C) (D)…">Relabel A–D</button>
+            </div>
+          </div>
+
+          <div class="subpanel" data-sub="figures" hidden>
             <div id="d-structs"></div>
             <div id="d-diagrams"></div>
             <label class="upload-edit">Replace diagram copy (PNG)
               <input type="file" id="d-diagram-file" accept="image/png">
             </label>
           </div>
+
+          <div class="subpanel" data-sub="read" hidden>
+            <p class="hint">Exactly what Mathpix read (locked original). Your editable copy is on the Question tab.</p>
+            <div id="d-ocr" class="ocr math"></div>
+          </div>
+
+          <div class="subpanel" data-sub="details" hidden>
+            <p id="d-signals" class="signals"></p>
+            <p id="d-snap" class="signals"></p>
+            <dl id="d-fields"></dl>
+          </div>
+
+          <div class="builder-actions">
+            <button id="b-undo" class="ghost" title="Undo the last change">↶ Undo</button>
+            <button id="b-reset" class="ghost" title="Back to what Mathpix read">Reset</button>
+            <button id="b-delete" class="danger">🗑 Remove</button>
+            <span class="spacer"></span>
+            <button id="b-labels" class="ghost" title="Save only the labels (number, type, subject, passage)">Save labels</button>
+            <button id="b-save" class="primary">✓ Save question</button>
+          </div>
         </div>
-        <div class="labels">
-          <label>Type <select id="d-qtype"></select></label>
-          <label>Q no <input type="text" id="d-qno" size="4"></label>
-          <label>Subject <input type="text" id="d-subject" size="12" list="subjects-list"></label>
-          <datalist id="subjects-list"></datalist>
-          <label>Passage <select id="d-passage"><option value="">none</option></select></label>
-          <button id="b-labels">Save labels</button>
-        </div>
-        <dl id="d-fields"></dl>
-        <div class="actions">
-          <button id="b-save" class="primary">Save text</button>
-          <button id="b-undo">Undo</button>
-          <button id="b-reset">Reset to original</button>
-          <button id="b-delete" class="danger">Remove question</button>
-        </div>
-      </div>
+      </section>
     </div>
+
+    <!-- ---------------- bottom: saved questions -->
+    <section class="dock" id="dock">
+      <div class="dock-head">
+        <button id="dock-toggle" class="ghost small" title="Show / hide">▾</button>
+        <h3>Questions</h3>
+        <span id="q-count" class="count"></span>
+        <div class="seg filter" id="q-filter">
+          <button data-f="saved" class="on">Saved <span class="count" id="n-saved"></span></button>
+          <button data-f="draft">Drafts <span class="count" id="n-draft"></span></button>
+          <button data-f="all">All</button>
+        </div>
+        <span class="spacer"></span>
+        <input id="q-search" class="search" type="search" placeholder="Search questions…">
+        <select id="q-subject-filter" title="Subject"><option value="">All subjects</option></select>
+        <label class="check"><input type="checkbox" id="only-review"> Needs review only</label>
+      </div>
+      <div id="q-list" class="q-cards"></div>
+    </section>
   </div>
 </main>
+
+<!-- ============================================================== Question bank -->
+<main id="bank" class="view" hidden>
+  <div class="page-head">
+    <div><h1>Question bank</h1><p class="sub">Every saved question from all your papers.</p></div>
+    <div class="stats" id="bank-stats"></div>
+  </div>
+  <div class="filterbar">
+    <input id="bank-search" class="search" type="search" placeholder="Search text…">
+    <select id="bank-paper"><option value="">All papers</option></select>
+    <select id="bank-subject"><option value="">All subjects</option></select>
+    <select id="bank-type"><option value="">All types</option></select>
+    <select id="bank-state">
+      <option value="saved">Saved only</option>
+      <option value="">Saved and drafts</option>
+    </select>
+    <span class="spacer"></span>
+    <button id="bank-add-all" class="ghost">➕ Add shown to test</button>
+  </div>
+  <div id="bank-list" class="bank-grid"></div>
+</main>
+
+<!-- ============================================================== Test -->
+<main id="test" class="view" hidden>
+  <div class="page-head">
+    <div><h1>Test</h1><p class="sub">Choose questions, set marks and time, then print or save the test as PDF.</p></div>
+    <div class="head-actions">
+      <button id="test-start" class="dark">▶ Take test</button>
+      <button id="test-print" class="primary">🖨 Print / Save as PDF</button>
+      <button id="test-print-key" class="ghost">Answer key</button>
+    </div>
+  </div>
+  <div class="test-grid">
+    <section class="card test-setup">
+      <h2>Test details</h2>
+      <label class="field block">Title <input id="t-title" type="text" placeholder="e.g. NEET Mock Test 1"></label>
+      <div class="row">
+        <label class="field block">Duration (min) <input id="t-duration" type="number" min="1" value="60"></label>
+        <label class="field block">Marks per question <input id="t-marks" type="number" step="0.5" value="4"></label>
+        <label class="field block">Negative marks <input id="t-neg" type="number" step="0.25" value="1"></label>
+      </div>
+      <label class="field block">Instructions
+        <textarea id="t-instr" rows="3" placeholder="e.g. Each question carries 4 marks. 1 mark is deducted for a wrong answer."></textarea></label>
+      <div class="card-head"><h2>Questions in this test <span id="t-count" class="count"></span></h2>
+        <button id="t-clear" class="ghost small">Clear</button></div>
+      <p class="hint">Add questions from the <a href="#/bank">Question bank</a>. Use ▲▼ to reorder.
+        Answers and marks are saved in this browser.</p>
+      <ol id="t-list" class="t-list"></ol>
+    </section>
+    <section class="card test-preview">
+      <div class="card-head"><h2>Preview</h2><span class="hint">as it will print</span></div>
+      <div id="test-paper" class="paper"></div>
+    </section>
+  </div>
+</main>
+
+<!-- ============================================================== dialogs -->
 <div id="chem-backdrop" class="backdrop" hidden></div>
-<div id="chem-dlg" class="chem panel" role="dialog" aria-modal="true" aria-label="Structure editor">
+<div id="chem-dlg" class="chem panel" role="dialog" aria-modal="true" aria-label="Structure editor" inert>
   <div class="chem-head"><b id="chem-title">Structure</b>
     <span class="hint">Redraw the structure in the editor, then Save. The drawing from the paper is on the left.</span>
     <button id="chem-close" class="link" title="close">✕</button></div>
@@ -161,7 +348,7 @@
       <h4>Recognised / typed molecule</h4>
       <svg id="chem-sd" width="260" height="190"></svg>
       <p id="chem-msg" class="signals"></p>
-      <label>SMILES <input id="chem-smiles" spellcheck="false" placeholder="e.g. C/C=C/CC"></label>
+      <label class="field block">SMILES <input id="chem-smiles" spellcheck="false" placeholder="e.g. C/C=C/CC"></label>
       <div class="chem-buttons">
         <button id="chem-recog" title="read the drawing automatically (a suggestion - check it)">Recognise drawing</button>
         <button id="chem-use" title="put this molecule into the editor">Use in editor →</button>
@@ -180,6 +367,19 @@
     <button id="mol3d-close" class="link" title="close">✕</button></div>
   <div id="mol3d" class="mol3d"></div>
 </dialog>
+<dialog id="ask-dlg" class="ask">
+  <form method="dialog">
+    <h3 id="ask-title"></h3>
+    <p id="ask-text"></p>
+    <div class="actions">
+      <span class="spacer"></span>
+      <button value="no" class="ghost" id="ask-no">Cancel</button>
+      <button value="yes" class="primary" id="ask-yes">OK</button>
+    </div>
+  </form>
+</dialog>
+<div id="runner" class="runner" hidden></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>
